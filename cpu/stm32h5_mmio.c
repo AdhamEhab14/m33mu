@@ -1654,6 +1654,15 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
     }
 }
 
+/* The flash TrustZone filter acts only on a part with its watermarks
+ * provisioned and TrustZone enabled: the rule reads follow in
+ * flash_sector_secure_cb, and writes must follow it too. */
+static mm_bool flash_tz_filter_active(void)
+{
+    const struct mm_target_cfg *cfg = mm_target_current_cfg();
+    return flash_secwm_provisioned() && cfg != 0 && cfg->tz_attr_for_addr != 0;
+}
+
 static void flash_wb_drop(void)
 {
     flash_ctl.wb_valid = MM_FALSE;
@@ -1779,7 +1788,7 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
                (unsigned long)size_bytes,
                (unsigned long)value);
     }
-    if (base == flash_ctl.base_ns &&
+    if (base == flash_ctl.base_ns && flash_tz_filter_active() &&
             flash_sector_attr_secure(&flash_ctl, offset)) {
         /* NS-alias write to a secure sector: write ignored (RM0517). */
         return MM_TRUE;
