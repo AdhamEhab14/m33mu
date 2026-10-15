@@ -64,6 +64,12 @@ commands control it at run time.
 | `flash save <file>` | write the whole flash array to `file` |
 | `flash load <file>` | replace the whole flash array with `file` (a shorter file leaves the rest erased); not an operation, nothing is counted or persisted |
 
+A core that locks up (a HardFault it cannot take, an exception return it
+cannot unstack) stays locked up, as on silicon: it runs nothing, time and the
+peripherals go on (a running watchdog still resets the chip), and only a reset
+or `power-cycle` ends it. A `run-for` still ends at its deadline; without one,
+a debugger is told with `SIGSEGV`. Without `--gdb`, a lockup ends the run.
+
 When a cut fires the core halts with `S05`. It stays halted, and every later
 flash operation is undone, until `power-cycle`: a `c` before that stops again
 at once.

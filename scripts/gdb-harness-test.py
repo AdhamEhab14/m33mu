@@ -6,7 +6,8 @@ captured UART and lets it update its flash and reset itself, all within one
 `run-for`; power-cycles it from the original image with a cut armed at its
 first program and checks that the cut operation never reached flash; then
 write-protects the sector through an option byte and checks that the
-update is refused and reported.
+update is refused and reported. A second firmware locks the core up: the
+emulator must stay up with the core halted until a power cycle.
 
 Usage: gdb-harness-test.py <path-to-m33mu>
 Exit 0 on pass (or skip: no firmware and no cross compiler), 1 on failure.
@@ -23,6 +24,7 @@ import time
 HERE = os.path.dirname(os.path.abspath(__file__))
 FWDIR = os.path.join(HERE, "..", "tests", "firmware", "test-gdb-harness")
 APP = os.path.join(FWDIR, "app.bin")
+LOCKUP = os.path.join(FWDIR, "app_lockup.bin")
 UART = 0x40004800
 SECTOR_ADDR = 0x0C000000 + 100 * 0x2000
 
@@ -82,6 +84,15 @@ class Gdb:
         if not ok:
             raise RuntimeError("monitor %s failed: %s" % (text, out.strip()))
         return out
+
+    def request(self, payload):
+        """A plain packet and its reply."""
+        self.send(payload)
+        while True:
+            reply = self._read_packet()
+            if reply[:1] in ("S", "T") or (reply.startswith("O") and reply != "OK"):
+                continue
+            return reply
 
     def cont(self):
         """Continue until the target stops; return the stop reply."""
@@ -202,25 +213,55 @@ def run(m33mu, work):
         log.close()
 
 
+def run_lockup(m33mu, work):
+    port = 3333 + (os.getpid() + 1000) % 2000
+    log = open(os.path.join(work, "m33mu-lockup.log"), "w")
+    proc = subprocess.Popen([m33mu, "--cpu", "stm32h563", "--gdb", "--port", str(port),
+                             "--no-realtime", LOCKUP], stdout=log, stderr=subprocess.STDOUT)
+    try:
+        g = Gdb(port)
+        check(g.run_for(10000) == "S05", "a run-for ends at its deadline although the core locked up")
+        check(proc.poll() is None, "m33mu stays up when the core locks up")
+        pc = g.request("p f")
+        t0 = int(g.must("vtime").split()[1])
+        check(g.run_for(10000) == "S05", "and so does the next")
+        check(int(g.must("vtime").split()[1]) - t0 >= 64000000 // 100, "time goes on")
+        check(g.request("p f") == pc, "but the core runs nothing")
+        g.must("power-cycle")
+        g.run_for(10000)
+        check(proc.poll() is None and g.request("p f") == pc,
+              "a power cycle restarts it, and it locks up again the same way")
+        g.monitor("quit")
+    finally:
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            proc.wait()
+        log.close()
+
+
 def main():
     m33mu = sys.argv[1] if len(sys.argv) > 1 else os.path.join(HERE, "..", "build", "m33mu")
     if not os.access(m33mu, os.X_OK):
         print("gdb-harness: emulator not found at %s" % m33mu, file=sys.stderr)
         return 1
-    if not os.path.exists(APP) and shutil.which("arm-none-eabi-gcc"):
-        subprocess.call(["make", "-C", FWDIR, "app.bin"],
+    if not (os.path.exists(APP) and os.path.exists(LOCKUP)) and shutil.which("arm-none-eabi-gcc"):
+        subprocess.call(["make", "-C", FWDIR, "all"],
                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    if not os.path.exists(APP):
+    if not (os.path.exists(APP) and os.path.exists(LOCKUP)):
         print("gdb-harness: SKIP (no %s, no arm-none-eabi-gcc)" % APP, file=sys.stderr)
         return 0
     work = tempfile.mkdtemp(prefix="m33mu-gdb-harness-")
     try:
         run(m33mu, work)
+        run_lockup(m33mu, work)
     except (AssertionError, RuntimeError, OSError) as e:
         print("gdb-harness: FAIL -- %s" % e, file=sys.stderr)
-        log = os.path.join(work, "m33mu.log")
-        if os.path.exists(log):
-            sys.stderr.write(open(log).read()[-3000:])
+        for name in ("m33mu.log", "m33mu-lockup.log"):
+            log = os.path.join(work, name)
+            if os.path.exists(log):
+                sys.stderr.write(open(log).read()[-3000:])
         return 1
     finally:
         shutil.rmtree(work, ignore_errors=True)

@@ -24,7 +24,9 @@
  * Prints "BOOT" on USART3. If sector 100 of bank 1 starts with its marker,
  * prints "UPDATED" and sleeps. Otherwise waits for one received byte and
  * echoes it as "GOT <c>", erases the sector and programs the marker
- * quad-word at its start, prints "DONE" and resets itself. */
+ * quad-word at its start, prints "DONE" and resets itself.
+ *
+ * Built with -DLOCKUP (app_lockup.bin), it locks the core up at once instead. */
 
 #include <stdint.h>
 
@@ -74,6 +76,12 @@ void Reset_Handler(void)
 {
     volatile uint32_t *dst = (volatile uint32_t *)SECTOR_ADDR;
     char c;
+
+#ifdef LOCKUP
+    /* app_lockup.bin: the stack points at nothing and an exception is taken, so
+     * the HardFault cannot be stacked either: the core locks up. */
+    __asm volatile ("msr msp, %0\n svc #0" : : "r" (0xFFFFFFF0u));
+#endif
 
     RCC_APB1LENR |= (1u << 18);
     USART_BRR = 64000000u / 115200u;

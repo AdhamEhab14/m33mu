@@ -155,6 +155,13 @@ static mm_bool g_quit_on_faults = MM_FALSE;
 /* --no-realtime: virtual time runs as fast as the host allows, never paced
  * against the wall clock. */
 static mm_bool g_no_realtime = MM_FALSE;
+/* The core locked up: a HardFault it could not take, an exception return it could
+ * not unstack. Alone that ends the run. Under a debugger the core stays locked up
+ * as on silicon (g_core_locked): it runs nothing and nothing but a reset wakes it,
+ * while time and the peripherals go on, a watchdog included. */
+static mm_bool g_core_lockup = MM_FALSE;
+static int g_core_lockup_sig = 11;
+static mm_bool g_core_locked = MM_FALSE;
 static mm_bool g_call_trace = MM_FALSE;
 static mm_bool g_record_start_set = MM_FALSE;
 static mm_bool g_record_started = MM_TRUE;
@@ -1489,6 +1496,29 @@ static mm_bool handle_tui(struct mm_tui *tui,
 }
 
 static mm_bool parse_u32(const char *s, mm_u32 *out);
+
+/* Under a debugger, a run ended by a lockup goes on with the core locked up (see
+ * g_core_locked). A debugging session is told with a stop; a harness running for
+ * a stretch of virtual time (`monitor run-for`) just sees nothing more happen. */
+static mm_bool hold_lockup(mm_bool opt_gdb, struct mm_gdb_stub *gdb, mm_bool *done,
+                           struct mm_cpu *cpu)
+{
+    if (!g_core_lockup) {
+        return MM_FALSE;
+    }
+    g_core_lockup = MM_FALSE;
+    if (!opt_gdb) {
+        return MM_FALSE;
+    }
+    *done = MM_FALSE;
+    g_core_locked = MM_TRUE;
+    cpu->sleeping = MM_TRUE;
+    printf("[LOCKUP] core locked up until the next reset\n");
+    if (mm_gdb_stub_should_run(gdb) && mm_gdb_stub_cycles_to_deadline(gdb) == (mm_u64)-1) {
+        mm_gdb_stub_notify_stop(gdb, g_core_lockup_sig);
+    }
+    return MM_TRUE;
+}
 
 /* Cycles the core stood still while the flash controller erased or
  * programmed (--flash-timing): it fetches from that flash, so it waits,
@@ -4111,6 +4141,7 @@ static mm_bool handle_pc_write(struct mm_cpu *cpu,
         }
         if (!exc_return_unstack(cpu, map, scs, value)) {
             printf("EXC_RETURN unstack failed\n");
+            g_core_lockup = MM_TRUE;
             return MM_FALSE;
         }
         itstate_sync_from_xpsr(cpu->xpsr, it_pattern, it_remaining, it_cond);
@@ -4245,6 +4276,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
             if (!mm_memmap_write(map, stack_sec, sp_frame + (mm_u32)(i * 4u), 4u, frame[i])) {
                 printf("HardFault: stacking failed at 0x%08lx\n", (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
                 record_bus_fault(scs, sec, sp_frame + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                g_core_lockup = MM_TRUE;   /* a HardFault that cannot be taken */
                 return MM_FALSE;
             }
         }
@@ -4255,6 +4287,7 @@ static mm_bool raise_hard_fault(struct mm_cpu *cpu, struct mm_memmap *map, struc
                         printf("HardFault: FP stacking failed at 0x%08lx\n",
                                (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
                         record_bus_fault(scs, sec, sp_fp + (mm_u32)(i * 4u), BFSR_STKERR | BFSR_PRECISERR | BFSR_BFARVALID);
+                        g_core_lockup = MM_TRUE;   /* a HardFault that cannot be taken */
                         return MM_FALSE;
                     }
                 }
@@ -4600,6 +4633,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
                 /* Stack write failed: escalate to HardFault (per ARMv8-M, stacking fault escalates). */
                 printf("HardFault: stacking failed at 0x%08lx\n",
                        (unsigned long)(sp_frame + (mm_u32)(i * 4u)));
+                g_core_lockup = MM_TRUE;   /* a HardFault that cannot be taken */
                 return MM_FALSE;
             }
         }
@@ -4609,6 +4643,7 @@ static mm_bool raise_usage_fault(struct mm_cpu *cpu, struct mm_memmap *map, stru
                     if (!mm_memmap_write(map, sec, sp_fp + (mm_u32)(i * 4u), 4u, cpu->s[i])) {
                         printf("HardFault: FP stacking failed at 0x%08lx\n",
                                (unsigned long)(sp_fp + (mm_u32)(i * 4u)));
+                        g_core_lockup = MM_TRUE;   /* a HardFault that cannot be taken */
                         return MM_FALSE;
                     }
                 }
@@ -6115,6 +6150,7 @@ int main(int argc, char **argv)
             tui_steps_offset = 0;
             gdb.vcycles = &vcycles;
             gdb.cpu_hz = cpu_hz;
+            g_core_locked = MM_FALSE;           /* a reset ends a lockup */
             if (fault_clock_count > 0u) {
                 mm_u8 i;
                 if (fault_clock_count > (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]))) {
@@ -6669,7 +6705,7 @@ int main(int argc, char **argv)
             last_running = target_should_run(opt_gdb, &gdb, tui_paused, tui_step);
 
             /* Main loop */
-            while (!done) {
+            while (!done || hold_lockup(opt_gdb, &gdb, &done, &cpu)) {
                 int pend_irq;
                 mm_bool running_now;
                 hz_now = mm_target_cpu_hz(&cfg);
@@ -6968,6 +7004,29 @@ int main(int argc, char **argv)
                     }
                     /* Flush accumulated cycles into virtual time before idling. */
                     host_sync_if_needed(vcycles, &vcycles_last_sync, host0_ns, sync_granularity, cpu_hz);
+                    if (g_core_locked) {
+                        /* Locked up: time goes on in steps of a millisecond, up to a
+                         * `monitor run-for` deadline; only a reset ends it. */
+                        mm_u64 step = (cpu_hz >= 1000u) ? cpu_hz / 1000u : 1u;
+                        if (opt_gdb) {
+                            mm_u64 left = mm_gdb_stub_cycles_to_deadline(&gdb);
+                            if (left != 0u && left < step) {
+                                step = left;
+                            }
+                        }
+                        mm_scs_systick_advance(&scs, step);
+                        mm_timer_tick(&cfg, step);
+                        vcycles += step;
+                        cycle_total += step;
+                        cycles_since_poll += step;
+                        mm_target_usart_poll(&cfg);
+                        if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
+                            reset_again = MM_TRUE;
+                            mm_system_clear_reset();
+                            break;
+                        }
+                        continue;
+                    }
                     /* Wake on event register or any pending enabled exception. */
                     if (cpu.event_reg) {
                         wake = MM_TRUE;
@@ -7285,7 +7344,7 @@ check_irq_pending:
                                 }
                             }
                             if (done) {
-                                if (opt_gdb) {
+                                if (opt_gdb && !g_core_lockup) {    /* hold_lockup() reports that */
                                     mm_gdb_stub_notify_stop(&gdb, 5);
                                 }
                                 break;
@@ -7469,15 +7528,15 @@ check_irq_pending:
                                     (unsigned long)mm_cpu_get_active_sp(&cpu),
                                     (unsigned long)cpu.r[14],
                                     (unsigned long)cpu.xpsr);
-                            if (opt_gdb) {
-                                mm_gdb_stub_notify_stop(&gdb, 11);
-                            }
+                            g_core_lockup = MM_TRUE;
+                            g_core_lockup_sig = 11;
                             if (trace_started) {
                                 mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                                 mm_trace_end_step(&cpu);
                                 record_window_step(&cpu, &map);
                             }
-                            break;
+                            done = MM_TRUE;     /* or locked up, see hold_lockup() */
+                            continue;
                         }
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
@@ -7526,15 +7585,15 @@ check_irq_pending:
                         }
                         if (!raise_usage_fault(&cpu, &map, &scs, f.pc_fetch, cpu.xpsr, (1u << 16))) {
                             printf("Unimplemented opcode 0x%08lx at PC=0x%08lx\n", (unsigned long)d.raw, (unsigned long)(f.pc_fetch | 1u));
-                            if (opt_gdb) {
-                                mm_gdb_stub_notify_stop(&gdb, 4);
-                            }
+                            g_core_lockup = MM_TRUE;
+                            g_core_lockup_sig = 4;
                             if (trace_started) {
                                 mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
                                 mm_trace_end_step(&cpu);
                                 record_window_step(&cpu, &map);
                             }
-                            break;
+                            done = MM_TRUE;     /* or locked up, see hold_lockup() */
+                            continue;
                         }
                         if (trace_started) {
                             mmio_bus_end_step(&map.mmio, mm_trace_get_undo_sink());
