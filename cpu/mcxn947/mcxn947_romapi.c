@@ -473,6 +473,15 @@ static void romapi_persist_flush(mm_u32 flash_off, mm_u32 len)
     }
 }
 
+/* The IAP memory interface takes bus addresses that may or may not be flash. */
+static void romapi_persist_flush_addr(const struct mm_memmap *map, mm_u32 addr, mm_u32 len)
+{
+    mm_u32 flash_off;
+    if (romapi_flash_offset(map, addr, len, &flash_off)) {
+        romapi_persist_flush(flash_off, len);
+    }
+}
+
 static mm_u32 romapi_flash_program(struct mm_cpu *cpu, struct mm_memmap *map)
 {
     mm_u32 start;
@@ -683,6 +692,7 @@ static mm_u32 romapi_iap_mem_write(struct mm_cpu *cpu, struct mm_memmap *map)
     if (!romapi_memcpy_from_map(map, cpu->sec_state, addr, buf, len, map)) {
         return ROMAPI_STATUS_MEM_WRITE_FAILED;
     }
+    romapi_persist_flush_addr(map, addr, len);
     return ROMAPI_STATUS_MEM_SUCCESS;
 }
 
@@ -701,6 +711,7 @@ static mm_u32 romapi_iap_mem_fill(struct mm_cpu *cpu, struct mm_memmap *map)
     if (!romapi_memset_map(map, cpu->sec_state, addr, (mm_u8)(pattern & 0xffu), len)) {
         return ROMAPI_STATUS_MEM_WRITE_FAILED;
     }
+    romapi_persist_flush_addr(map, addr, len);
     return ROMAPI_STATUS_MEM_SUCCESS;
 }
 
@@ -717,6 +728,7 @@ static mm_u32 romapi_iap_mem_erase(struct mm_cpu *cpu, struct mm_memmap *map)
     if (!romapi_memset_map(map, cpu->sec_state, addr, 0xffu, len)) {
         return ROMAPI_STATUS_MEM_WRITE_FAILED;
     }
+    romapi_persist_flush_addr(map, addr, len);
     return ROMAPI_STATUS_MEM_SUCCESS;
 }
 
@@ -731,6 +743,7 @@ static mm_u32 romapi_iap_mem_erase_all(struct mm_cpu *cpu, struct mm_memmap *map
     if (!romapi_memset_map(map, cpu->sec_state, base, 0xffu, size)) {
         return ROMAPI_STATUS_MEM_WRITE_FAILED;
     }
+    romapi_persist_flush(0u, size);
     return ROMAPI_STATUS_MEM_SUCCESS;
 }
 
