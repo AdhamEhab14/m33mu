@@ -42,6 +42,7 @@ build/m33mu --gdb --gdb-symbols firmware.elf firmware.bin
 - `--call-trace`: log calls, returns, interrupts, and TrustZone SG transitions
 - `--quit-on-faults`: terminate when the first fault is raised
 - `--timeout <seconds>`: force a host-side timeout. On expiry the CPU state (PC, LR, SP, xPSR, mode, secure state and r0-r12) is written to stderr before exit, so a hang in an unattended run says where it hung.
+- `--no-realtime`: run virtual time as fast as the host allows instead of pacing it against the wall clock. Instructions run back to back and a core in WFI/WFE jumps straight to its next SysTick deadline (or steps 200 us of virtual time when none is armed), so firmware delays and idle periods cost almost no wall time. The guest cannot tell the difference: SysTick, timers, watchdogs and the DWT cycle counter all count virtual cycles. Whatever sits in wall time outside the emulator can: PTY/terminal input arrives at an arbitrary virtual time, TAP/VDE/USB peers see the guest's timeouts expire early, and a guest idling with no SysTick while waiting for host input spins a host core. `--timeout` stays wall-clock. See [CI and automated testing](ci-testing.md#--no-realtime).
 - `--rng-seed <n>`: fix the stream every modeled RNG peripheral draws from, making a run reproducible. Without it a seed is drawn from the host and announced on stderr, so any run can be replayed.
 - `--expect-bkpt <imm>`: turn a firmware BKPT into a pass/fail test signal
 - `--capstone`: cross-check decode/execute behavior against Capstone

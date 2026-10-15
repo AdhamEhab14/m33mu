@@ -572,6 +572,7 @@ add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585-swap-reset app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-uart-echo app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-flash-tz app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-no-realtime app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h5f4-uart-echo app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-wolfssl-iotsafe app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585 app.bin
@@ -607,6 +608,14 @@ add_custom_target(firmware-build
 add_test(NAME flash_tz_hw_parity_test
   COMMAND /bin/sh "${CMAKE_SOURCE_DIR}/scripts/flash-tz-hw-parity.sh" "$<TARGET_FILE:m33mu>")
 set_tests_properties(flash_tz_hw_parity_test PROPERTIES
+  WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+)
+
+# --no-realtime against the default pacing. Builds its firmware when a cross
+# toolchain is around and skips itself otherwise.
+add_test(NAME no_realtime_test
+  COMMAND /bin/sh "${CMAKE_SOURCE_DIR}/scripts/no-realtime-test.sh" "$<TARGET_FILE:m33mu>")
+set_tests_properties(no_realtime_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
 

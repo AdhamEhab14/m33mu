@@ -5,6 +5,7 @@
 - `--expect-bkpt`
 - `--uart-stdout`
 - `--timeout`
+- `--no-realtime`
 
 ## Recommended Pattern
 
@@ -51,6 +52,32 @@ Notes:
 
 - this is intended for non-TUI usage
 - when TUI is active, stdout UART routing is disabled
+
+## `--no-realtime`
+
+By default `m33mu` paces virtual time against the wall clock: it never runs ahead of real time, and a core sleeping in WFI/WFE for one virtual second takes one real second. That keeps it honest towards the outside world (a terminal, a TAP interface, a USB host), but a test suite pays for every delay the firmware waits through.
+
+`--no-realtime` removes the pacing. Instructions run back to back, and a sleeping core jumps straight to its next SysTick deadline, or advances in steps of 200 us of virtual time when no SysTick is armed. A firmware that sleeps ten virtual seconds finishes in a few milliseconds.
+
+What stays the same:
+
+- everything the guest observes: SysTick, timers, watchdogs and the DWT cycle counter all count virtual cycles, so the firmware takes the same path with or without the option
+- reproducibility: with the same images, inputs and `--rng-seed`, two runs execute the same instructions at the same virtual cycles
+
+What changes, for anything that lives in wall time outside the emulator:
+
+- input typed into a PTY or the terminal reaches the guest at an arbitrary virtual time
+- `--tap`, `--vde` and `--usb` peers see the guest's timeouts and retransmits expire early
+- a guest that idles with no SysTick armed while waiting for host input spins a host core instead of napping
+- `--timeout` is still wall-clock, so a few seconds of it now cover a long stretch of virtual time
+
+Use it for unattended runs that talk to nothing outside the emulator in real time, which is most CI:
+
+```sh
+build/m33mu --no-realtime --uart-stdout --expect-bkpt 0x7f --timeout 10 firmware.bin
+```
+
+`scripts/no-realtime-test.sh` (run by ctest) checks both modes against `tests/firmware/test-no-realtime`.
 
 ## `--timeout`
 

@@ -264,6 +264,32 @@ Example:
 .B m33mu --timeout 10 firmware.bin
 .RE
 .TP
+.BR --no-realtime
+Run virtual time as fast as the host allows instead of pacing it against the wall clock.
+
+By default the emulator never lets virtual time run ahead of host time: it sleeps whenever the guest gets ahead, and a core waiting in WFI or WFE costs as much wall time as the wait it models. With this option the sleeps are gone. Instructions run back to back, and a sleeping core jumps straight to its next SysTick deadline, or advances in steps of 200 microseconds of virtual time when no SysTick is armed. A firmware that waits ten virtual seconds finishes in a fraction of a wall second.
+
+Everything the guest can observe is clocked by virtual cycles (SysTick, timers, watchdogs, the DWT cycle counter), so the firmware behaves the same with or without the option, and runs are reproducible given the same images, inputs and
+.BR --rng-seed .
+
+Anything outside the emulator still lives in wall time, and sees the guest's clock run fast or jump:
+host input typed into a PTY or the terminal arrives at an arbitrary virtual time;
+.BR --tap ,
+.BR --vde
+and
+.BR --usb
+peers see the guest's timeouts and retransmits expire early;
+and a guest idling with no SysTick while it waits for host input spins a host core. Use it for unattended runs that need neither.
+
+.B --timeout
+stays a wall\-clock limit; with this option a few seconds of it cover a long stretch of virtual time.
+
+Example:
+
+.RS
+.B m33mu --no-realtime --expect-bkpt 0x7f --timeout 10 firmware.bin
+.RE
+.TP
 .BR --persist
 Write modified flash contents back to the original input image files when supported.
 
@@ -511,6 +537,9 @@ Load two firmware images into flash, for example Secure and Non\-secure images i
 .TP
 .B m33mu --uart-stdout --expect-bkpt 0x42 --timeout 10 firmware.bin
 Run a firmware test suitable for CI: log UART to stdout, fail if the expected BKPT is not reached, and abort if the host timeout expires.
+.TP
+.B m33mu --no-realtime --uart-stdout --expect-bkpt 0x42 --timeout 10 firmware.bin
+The same test with virtual time unpaced: delays, timeouts and idle periods in the firmware cost almost no wall time.
 .TP
 .B m33mu --boot spiflash --spiflash:SPI1:file=flash.img:size=0x200000:mmap=0x90000000 firmware.bin
 Attach memory\-mapped SPI flash and boot from it.

@@ -149,6 +149,9 @@
 #define IDLE_SLEEP_NS 200000ull            /* 200 us host nap when fully idle */
 
 static mm_bool g_quit_on_faults = MM_FALSE;
+/* --no-realtime: virtual time runs as fast as the host allows, never paced
+ * against the wall clock. */
+static mm_bool g_no_realtime = MM_FALSE;
 static mm_bool g_call_trace = MM_FALSE;
 static mm_bool g_record_start_set = MM_FALSE;
 static mm_bool g_record_started = MM_TRUE;
@@ -1497,7 +1500,7 @@ static void host_sync_if_needed(mm_u64 vcycles,
     mm_u64 now_ns;
     mm_u64 target_ns;
 
-    if (vcycles_last_sync == NULL) {
+    if (vcycles_last_sync == NULL || g_no_realtime) {
         return;
     }
     delta_cycles = vcycles - *vcycles_last_sync;
@@ -5154,6 +5157,8 @@ int main(int argc, char **argv)
             i++;
         } else if (strcmp(argv[i], "--persist") == 0) {
             opt_persist = MM_TRUE;
+        } else if (strcmp(argv[i], "--no-realtime") == 0) {
+            g_no_realtime = MM_TRUE;
         } else if (strcmp(argv[i], "--puf-seed") == 0 && i + 1 < argc) {
             if (!parse_hex_u64(argv[i + 1], &opt_puf_seed)) {
                 fprintf(stderr, "invalid puf seed value: %s\n", argv[i + 1]);
@@ -5589,7 +5594,7 @@ int main(int argc, char **argv)
 #ifdef M33MU_HAS_NCURSES
                         "[--tui] "
 #endif
-                        "[--persist] "
+                        "[--persist] [--no-realtime] "
                         "[--puf-seed <value>] [--puf-cold-boot <n>] [--puf-noise <n>] "
                         "[--sbkload-key <hex>] "
 #ifdef M33MU_USE_LIBCAPSTONE
@@ -6830,10 +6835,12 @@ int main(int argc, char **argv)
                         mm_u64 delta = mm_scs_systick_cycles_until_fire(&scs);
                         if (delta == (mm_u64)-1) {
                             mm_u64 idle_cycles = 0;
-                            struct timespec req;
-                            req.tv_sec = 0;
-                            req.tv_nsec = (long)IDLE_SLEEP_NS;
-                            nanosleep(&req, 0);
+                            if (!g_no_realtime) {
+                                struct timespec req;
+                                req.tv_sec = 0;
+                                req.tv_nsec = (long)IDLE_SLEEP_NS;
+                                nanosleep(&req, 0);
+                            }
                             if (cpu_hz != 0) {
                                 idle_cycles = (mm_u64)(((long double)cpu_hz * (long double)IDLE_SLEEP_NS) / (long double)NS_PER_SEC);
                             }
