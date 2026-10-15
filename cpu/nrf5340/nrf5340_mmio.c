@@ -889,7 +889,7 @@ static mm_bool nvmc_write_cb(void *opaque,
     }
 
     if (nvmc->persist != 0 && nvmc->persist->enabled) {
-        mm_flash_persist_flush((struct mm_flash_persist *)nvmc->persist, addr, size_bytes);
+        mm_flash_persist_flush((struct mm_flash_persist *)nvmc->persist, offset, size_bytes);
     }
     return MM_TRUE;
 }
@@ -900,7 +900,7 @@ static void nvmc_erase_all(struct nvmc_state *nvmc)
     memset(nvmc->flash, 0xFF, nvmc->flash_size);
     if (nvmc->persist != 0 && nvmc->persist->enabled) {
         mm_flash_persist_flush((struct mm_flash_persist *)nvmc->persist,
-                               nvmc->base_ns,
+                               0u,
                                nvmc->flash_size);
     }
 }
@@ -921,7 +921,7 @@ static void nvmc_erase_page(struct nvmc_state *nvmc, mm_u32 addr)
     memset(nvmc->flash + page_base, 0xFF, page_size);
     if (nvmc->persist != 0 && nvmc->persist->enabled) {
         mm_flash_persist_flush((struct mm_flash_persist *)nvmc->persist,
-                               base + page_base,
+                               page_base,
                                page_size);
     }
 }

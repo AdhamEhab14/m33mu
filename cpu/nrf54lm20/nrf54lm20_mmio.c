@@ -476,7 +476,7 @@ static mm_bool rramc_write_cb(void *opaque,
     }
 
     if (rramc->persist != 0 && rramc->persist->enabled) {
-        mm_flash_persist_flush((struct mm_flash_persist *)rramc->persist, addr, size_bytes);
+        mm_flash_persist_flush((struct mm_flash_persist *)rramc->persist, offset, size_bytes);
     }
     return MM_TRUE;
 }
@@ -487,7 +487,7 @@ static void rramc_erase_all(struct rramc_state *rramc)
     memset(rramc->flash, 0xFF, rramc->flash_size);
     if (rramc->persist != 0 && rramc->persist->enabled) {
         mm_flash_persist_flush((struct mm_flash_persist *)rramc->persist,
-                               rramc->base_ns,
+                               0u,
                                rramc->flash_size);
     }
 }
