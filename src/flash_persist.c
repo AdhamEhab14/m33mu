@@ -114,20 +114,22 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
             }
             if (fstat(fd, &st) == 0) {
                 if (st.st_size > 0) {
-                    if ((unsigned long)st.st_size > (unsigned long)flash_size) {
-                        if (ftruncate(fd, (off_t)flash_size) != 0) {
+                    /* The file holds flash from its own offset on: never more
+                     * than what is left of the flash after that offset. */
+                    if ((unsigned long)st.st_size > (unsigned long)(flash_size - start)) {
+                        if (ftruncate(fd, (off_t)(flash_size - start)) != 0) {
                             fprintf(stderr, "persist: failed to truncate %s\n",
                                     persist->ranges[i].path);
                         }
-                        cur_size = flash_size;
+                        cur_size = flash_size - start;
                     } else {
                         cur_size = (mm_u32)st.st_size;
                     }
                 }
             }
-            if (cur_size < flash_size) {
+            if (cur_size < end - start) {
                 mm_u8 ff[4096];
-                mm_u32 remaining = flash_size - cur_size;
+                mm_u32 remaining = (end - start) - cur_size;
                 mm_u32 chunk;
                 memset(ff, 0xFF, sizeof(ff));
                 if (lseek(fd, (off_t)cur_size, SEEK_SET) < 0) {
@@ -193,7 +195,7 @@ void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u3
         w_start = (a0 > start) ? a0 : start;
         w_end = (a1 < end) ? a1 : end;
         if (w_end > w_start) {
-            if (lseek(persist->ranges[i].fd, (off_t)w_start, SEEK_SET) < 0) {
+            if (lseek(persist->ranges[i].fd, (off_t)(w_start - start), SEEK_SET) < 0) {
                 fprintf(stderr, "persist: failed to seek %s\n", persist->ranges[i].path);
                 continue;
             }
