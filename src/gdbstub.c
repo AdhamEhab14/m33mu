@@ -194,8 +194,10 @@ static void gdb_send_console(struct mm_gdb_stub *stub, const char *msg)
     len = strlen(msg);
     while (pos < len) {
         size_t chunk = len - pos;
-        if (chunk > ((sizeof(out) - 2u) / 2u)) {
-            chunk = (sizeof(out) - 2u) / 2u;
+        /* 'O' and two hex digits a byte must fit what gdb_send_packet
+         * sends: the buffer less '$' and "#xx" */
+        if (chunk > ((GDB_BUF_SIZE - 5u) / 2u)) {
+            chunk = (GDB_BUF_SIZE - 5u) / 2u;
         }
         if (hex_encode_bytes(msg + pos, chunk, out + 1, sizeof(out) - 1u) == 0) {
             break;

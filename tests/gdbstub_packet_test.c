@@ -106,9 +106,77 @@ static int test_monitor_fault_clock_with_argument_adds_clock(void)
     return 0;
 }
 
+static size_t hex_decode_bytes_n(const char *in, size_t n, char *out)
+{
+    size_t i;
+    for (i = 0; i + 1u < n; i += 2u) {
+        unsigned int v = 0;
+        if (sscanf(in + i, "%2x", &v) != 1) break;
+        out[i / 2u] = (char)v;
+    }
+    return n / 2u;
+}
+
+/* A console message longer than one packet arrives whole: every O packet
+ * fits the packet buffer, so none loses its last hex digit. */
+static int test_long_console_message_arrives_whole(void)
+{
+    int fds[2];
+    struct mm_gdb_stub stub;
+    char msg[1201];
+    static char wire[8192];
+    char got[sizeof(msg)];
+    size_t got_len = 0;
+    ssize_t n;
+    size_t len = 0;
+    char *p;
+    size_t i;
+
+    for (i = 0; i < sizeof(msg) - 1u; ++i) {
+        msg[i] = (char)('a' + (i % 26u));
+    }
+    msg[sizeof(msg) - 1u] = '\0';
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) != 0) {
+        printf("gdbstub_packet_test: socketpair failed\n");
+        return 1;
+    }
+    memset(&stub, 0, sizeof(stub));
+    mm_gdb_stub_init(&stub);
+    stub.client_fd = fds[1];
+    gdb_send_console(&stub, msg);
+    close(fds[1]);
+    while ((n = read(fds[0], wire + len, sizeof(wire) - 1u - len)) > 0) {
+        len += (size_t)n;
+    }
+    close(fds[0]);
+    wire[len] = '\0';
+
+    for (p = wire; (p = strchr(p, '$')) != 0; ) {
+        char *end = strchr(p, '#');
+        size_t hex;
+        if (end == 0 || p[1] != 'O') {
+            printf("gdbstub_packet_test: not a console packet\n");
+            return 1;
+        }
+        hex = (size_t)(end - p - 2);
+        if ((hex & 1u) != 0u || got_len + hex / 2u > sizeof(got)) {
+            printf("gdbstub_packet_test: console packet with %lu hex digits\n", (unsigned long)hex);
+            return 1;
+        }
+        got_len += hex_decode_bytes_n(p + 2, hex, got + got_len);
+        p = end;
+    }
+    if (got_len != sizeof(msg) - 1u || memcmp(got, msg, got_len) != 0) {
+        printf("gdbstub_packet_test: console message came back as %lu bytes\n", (unsigned long)got_len);
+        return 1;
+    }
+    return 0;
+}
+
 int main(void)
 {
     if (test_gdb_send_packet_keeps_full_1020_char_payload() != 0) return 1;
+    if (test_long_console_message_arrives_whole() != 0) return 1;
     if (test_monitor_fault_clock_with_argument_adds_clock() != 0) return 1;
     {
         struct mm_gdb_stub stub;
