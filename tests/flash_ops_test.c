@@ -204,6 +204,81 @@ static int test_cut_on_erase_and_resync(void)
     return 0;
 }
 
+/* Timing: a program costs one program time per started unit, an erase one
+ * erase time per started unit; the trace carries @us, and the stall drains. */
+static int test_timing(void)
+{
+    static const struct mm_flash_timing t = { 16u, { 31u, 100u }, 0x2000u, { 2000u, 10000u } };
+    char path[] = "/tmp/m33mu_flash_ops_timing_XXXXXX";
+    char text[256];
+    const mm_u8 q[20] = { 0 };
+    int fd;
+    int rc = 1;
+
+    memset(flash, 0xFF, sizeof(flash));
+    memset(&persist, 0, sizeof(persist));
+    mm_flash_persist_watch(&persist, flash, SIZE);
+    if (!mm_flash_ops_enable(flash, SIZE, BASE)) return 1;
+    fd = mkstemp(path);
+    if (fd < 0) return 1;
+    close(fd);
+    if (!mm_flash_ops_trace_open(path)) goto out;
+
+    mm_flash_ops_set_timing(&t, MM_FLASH_TIMING_TYPICAL);
+    program(0x40u, q, 4u);              /* one unit: 31 */
+    program(0x80u, q, 20u);             /* two units: 62 */
+    erase(0x0u, SIZE);                  /* mass: two sectors, 4000 */
+    if (mm_flash_ops_take_stall_us() != 31u + 62u + 4000u) goto out;
+    if (mm_flash_ops_take_stall_us() != 0u) goto out;
+    mm_flash_ops_set_timing(&t, MM_FLASH_TIMING_MAX);
+    erase(0x2000u, 0x2000u);
+    if (mm_flash_ops_take_stall_us() != 10000u) goto out;
+    mm_flash_ops_set_timing(&t, MM_FLASH_TIMING_NONE);
+    erase(0x2000u, 0x2000u);
+    if (mm_flash_ops_take_stall_us() != 0u) goto out;
+    mm_flash_ops_trace_close();
+
+    if (read_file(path, text, sizeof(text)) != 0) goto out;
+    if (strcmp(text,
+               "P 0x0C000040 0x00000000 @31\n"
+               "P 0x0C000080 0x0000000000000000000000000000000000000000 @62\n"
+               "M 0x0C000000 @4000\n"
+               "E 0x0C002000 #2000 @10000\n"
+               "E 0x0C002000 #2000\n") != 0) {
+        fprintf(stderr, "trace:\n%s", text);
+        goto out;
+    }
+    rc = 0;
+out:
+    mm_flash_ops_set_timing(0, MM_FLASH_TIMING_NONE);
+    mm_flash_ops_disable();
+    unlink(path);
+    return rc;
+}
+
+/* After the cut the power is off: later operations are undone too. */
+static int test_nothing_after_cut(void)
+{
+    const mm_u8 z[4] = { 0, 0, 0, 0 };
+
+    memset(flash, 0xFF, sizeof(flash));
+    memset(&persist, 0, sizeof(persist));
+    mm_flash_persist_watch(&persist, flash, SIZE);
+    if (!mm_flash_ops_enable(flash, SIZE, BASE)) return 1;
+    mm_flash_ops_cut_at(0u);
+    program(0x10u, z, 4u);              /* cut */
+    program(0x20u, z, 4u);              /* after the cut */
+    erase(0x0u, 0x2000u);
+    if (!mm_flash_ops_cut_fired(0) || flash[0x10u] != 0xFFu || flash[0x20u] != 0xFFu ||
+        mm_flash_ops_count() != 0u) {
+        fprintf(stderr, "operation after the cut reached the array\n");
+        mm_flash_ops_disable();
+        return 1;
+    }
+    mm_flash_ops_disable();
+    return 0;
+}
+
 int main(void)
 {
     int fails = 0;
@@ -217,6 +292,14 @@ int main(void)
     }
     if (test_cut_on_erase_and_resync() != 0) {
         printf("FAIL cut on erase and resync\n");
+        fails++;
+    }
+    if (test_timing() != 0) {
+        printf("FAIL timing\n");
+        fails++;
+    }
+    if (test_nothing_after_cut() != 0) {
+        printf("FAIL nothing after cut\n");
         fails++;
     }
     if (fails != 0) {

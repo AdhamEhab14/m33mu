@@ -29,6 +29,7 @@
 struct mmio_bus;
 struct mm_nvic;
 struct mm_memmap;
+struct mm_flash_timing;
 struct mm_cpu;
 
 /* Multicore glue for SoCs with a second Cortex-M core (core_count > 1).
@@ -119,6 +120,10 @@ struct mm_target_cfg {
                             const mm_u8 *flash,
                             mm_u32 flash_size,
                             mm_u32 *vtor_out);
+
+    /* Optional: how long flash operations take (m33mu/flash_ops.h).
+     * 0 = unknown, operations take no time. */
+    const struct mm_flash_timing *flash_timing;
 };
 
 #define MM_TARGET_FLAG_NVM_WRITEONCE (1u << 0)

@@ -314,7 +314,25 @@ erase of the whole array
 bulk rewrite of the whole array (bank swap)
 .RE
 .IP
+With
+.BR --flash-timing ,
+each line ends with
+.BI @ us\fR,
+the time the operation took in microseconds.
 The kind is read from the array: a range of 32 bytes or more left all 0xFF is an erase, anything else a program. The run ends with the number of operations performed.
+.TP
+.BR --flash-timing " " none|typical|max
+Make flash erases and programs take the time the chip's datasheet gives them, typical or worst case. The default is
+.BR none :
+an operation completes within the register write that starts it.
+
+The core fetches from the flash it is erasing, so it stands still for that time while SysTick, timers and watchdogs keep counting. A firmware whose watchdog is shorter than a sector erase gets reset as on the chip, and timeouts around flash operations behave as on the board. Program time counts per started program unit, erase time per started erase unit; bank and mass erases are that sum, which is how datasheets give them.
+
+Timing data exists for stm32h563 (DS14258 table 51: 31/100 us per 128 bits, 2/10 ms per 8 KB sector). Other targets warn and take no time.
+
+Combine with
+.B --no-realtime
+unless the delays should also be felt in wall time.
 .TP
 .BR --flash-cut " " n
 Cut the power just before flash operation

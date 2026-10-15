@@ -39,6 +39,24 @@
 
 #define MM_FLASH_OPS_NEVER ((mm_u64)-1)
 
+/* How long operations take on the chip, from its datasheet: [0] typical,
+ * [1] the slowest allowed. A program of len bytes takes
+ * ceil(len / program_unit) program times, an erase ceil(len / erase_unit)
+ * erase times (bank and mass erases included, which datasheets give as
+ * that sum). */
+struct mm_flash_timing {
+    mm_u32 program_unit;
+    mm_u32 program_us[2];
+    mm_u32 erase_unit;
+    mm_u32 erase_us[2];
+};
+
+enum mm_flash_timing_level {
+    MM_FLASH_TIMING_NONE = 0,
+    MM_FLASH_TIMING_TYPICAL,
+    MM_FLASH_TIMING_MAX
+};
+
 enum mm_flash_op_kind {
     MM_FLASH_OP_PROGRAM = 0,
     MM_FLASH_OP_ERASE,
@@ -64,8 +82,8 @@ mm_bool mm_flash_ops_enabled(void);
 void mm_flash_ops_resync(void);
 
 /* Called for every operation, after the port applied it to the array.
- * Returns MM_FALSE when this is the operation to cut at: the range has
- * been put back as it was and a cut is pending. */
+ * Returns MM_FALSE when this is the operation to cut at, or any operation
+ * after it (the power is off): the range is put back as it was. */
 mm_bool mm_flash_ops_note(mm_u32 offset, mm_u32 len);
 
 mm_u64 mm_flash_ops_count(void);
@@ -83,10 +101,19 @@ mm_bool mm_flash_ops_cut_fired(struct mm_flash_cut *out);
  *                      two hex digits per byte
  *   E <addr> #<len>    erase of len bytes (hex)
  *   M <addr>           erase of the whole array
- *   B <addr> #<len>    bulk rewrite of the whole array (bank swap) */
+ *   B <addr> #<len>    bulk rewrite of the whole array (bank swap)
+ * followed by @<us> (decimal) when operations take time. */
 mm_bool mm_flash_ops_trace_open(const char *path);
 void mm_flash_ops_trace_close(void);
 
 const char *mm_flash_op_kind_name(enum mm_flash_op_kind kind);
+
+/* Make operations take the time `timing` gives them (0 or NONE: no time).
+ * The core cannot fetch from flash while it is busy, so the run loop stalls
+ * the core for the time taken since it last asked; peripherals keep
+ * counting. The trace gets a trailing @<us> on each line. */
+void mm_flash_ops_set_timing(const struct mm_flash_timing *timing,
+                             enum mm_flash_timing_level level);
+mm_u64 mm_flash_ops_take_stall_us(void);
 
 #endif /* M33MU_FLASH_OPS_H */

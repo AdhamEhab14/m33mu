@@ -24,6 +24,7 @@
 
 /* STM32H563 memory map (Secure / Non-secure aliases) */
 #include "m33mu/target.h"
+#include "m33mu/flash_ops.h"
 
 #define STM32H563_FLASH_BASE_S   0x0C000000u
 #define STM32H563_FLASH_BASE_NS  0x08000000u
@@ -74,5 +75,12 @@ static const struct mm_ram_region STM32H563_RAM_REGIONS[] = {
 #define STM32H563_TZ_ATTR     mm_stm32h563_tz_attr_for_addr
 
 #define STM32H563_FLAGS (MM_TARGET_FLAG_NVM_WRITEONCE | MM_TARGET_FLAG_FPU)
+
+/* DS14258 Rev 6, table 51: a 128-bit program takes 31 us (100 us max), an
+ * 8 KB sector erase 2 ms (10 ms max). Bank erase (0.256 s / 1.3 s) and mass
+ * erase (0.512 s / 2.6 s) are those sector times summed. */
+static const struct mm_flash_timing STM32H563_FLASH_TIMING = {
+    16u, { 31u, 100u }, 0x2000u, { 2000u, 10000u }
+};
 
 #endif /* M33MU_CPU_STM32H563_CONFIG_H */

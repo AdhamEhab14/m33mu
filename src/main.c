@@ -1487,6 +1487,18 @@ static mm_bool handle_tui(struct mm_tui *tui,
 }
 
 static mm_bool parse_u32(const char *s, mm_u32 *out);
+
+/* Cycles the core stood still while the flash controller erased or
+ * programmed (--flash-timing): it fetches from that flash, so it waits,
+ * while SysTick and the peripherals keep counting. */
+static mm_u64 flash_stall_cycles(mm_u64 cpu_hz)
+{
+    mm_u64 us = mm_flash_ops_take_stall_us();
+    if (us == 0u || cpu_hz == 0u) {
+        return 0u;
+    }
+    return (us * cpu_hz) / 1000000u;
+}
 static mm_bool parse_usb_spec(const char *spec, char *udc_out, size_t udc_len);
 static struct mm_decoded decode_t32_fast(const struct mm_fetch_result *fetch,
                                          const struct mm_cpu *cpu,
@@ -4966,6 +4978,7 @@ int main(int argc, char **argv)
     const char *opt_flash_trace = 0;
     mm_u64 opt_flash_cut = MM_FLASH_OPS_NEVER;
     mm_bool opt_flash_cut_erase = MM_FALSE;
+    enum mm_flash_timing_level opt_flash_timing = MM_FLASH_TIMING_NONE;
     mm_u32 opt_flash_cut_erase_addr = 0u;
     mm_bool opt_quit_on_faults = MM_FALSE;
     mm_bool opt_capstone = MM_FALSE;
@@ -5175,6 +5188,18 @@ int main(int argc, char **argv)
                 return 1;
             }
             opt_flash_cut = (mm_u64)n;
+            i++;
+        } else if (strcmp(argv[i], "--flash-timing") == 0 && i + 1 < argc) {
+            if (strcmp(argv[i + 1], "none") == 0) {
+                opt_flash_timing = MM_FLASH_TIMING_NONE;
+            } else if (strcmp(argv[i + 1], "typical") == 0) {
+                opt_flash_timing = MM_FLASH_TIMING_TYPICAL;
+            } else if (strcmp(argv[i + 1], "max") == 0) {
+                opt_flash_timing = MM_FLASH_TIMING_MAX;
+            } else {
+                fprintf(stderr, "invalid flash-timing: %s (none, typical or max)\n", argv[i + 1]);
+                return 1;
+            }
             i++;
         } else if (strcmp(argv[i], "--flash-cut-erase") == 0 && i + 1 < argc) {
             if (!parse_u32(argv[i + 1], &opt_flash_cut_erase_addr)) {
@@ -5620,6 +5645,7 @@ int main(int argc, char **argv)
 #endif
                         "[--persist] [--no-realtime] "
                         "[--flash-trace <file>] [--flash-cut <n>] [--flash-cut-erase <addr>] "
+                        "[--flash-timing none|typical|max] "
                         "[--puf-seed <value>] [--puf-cold-boot <n>] [--puf-noise <n>] "
                         "[--sbkload-key <hex>] "
 #ifdef M33MU_USE_LIBCAPSTONE
@@ -5973,7 +5999,8 @@ int main(int argc, char **argv)
         }
         }
     }
-    if (opt_flash_trace != 0 || opt_flash_cut != MM_FLASH_OPS_NEVER || opt_flash_cut_erase) {
+    if (opt_flash_trace != 0 || opt_flash_cut != MM_FLASH_OPS_NEVER || opt_flash_cut_erase ||
+        opt_flash_timing != MM_FLASH_TIMING_NONE) {
         if (boot_mode != MM_BOOT_FLASH || !mm_flash_ops_enable(flash, cfg.flash_size_s, cfg.flash_base_s)) {
             fprintf(stderr, "flash operation tracking needs flash boot\n");
             rc = 1;
@@ -5986,6 +6013,11 @@ int main(int argc, char **argv)
             goto cleanup;
         }
         mm_flash_ops_cut_at(opt_flash_cut);
+        if (opt_flash_timing != MM_FLASH_TIMING_NONE && cfg.flash_timing == 0) {
+            printf("warning: no flash timing data for %s; operations take no time\n",
+                   (cpu_name != 0) ? cpu_name : "this cpu");
+        }
+        mm_flash_ops_set_timing(cfg.flash_timing, opt_flash_timing);
         if (opt_flash_cut_erase) {
             mm_flash_ops_cut_on_erase(opt_flash_cut_erase_addr);
         }
@@ -7126,6 +7158,21 @@ check_irq_pending:
                                 mm_scs_systick_advance(&scs, ops_executed);
                                 mm_timer_tick(&cfg, ops_executed);
                             }
+                            {
+                                mm_u64 stall = flash_stall_cycles(cpu_hz);
+                                if (stall != 0u) {
+                                    cycles_since_poll += stall;
+                                    cycle_total += stall;
+                                    vcycles += stall;
+                                    mm_scs_systick_advance(&scs, stall);
+                                    mm_timer_tick(&cfg, stall);
+                                }
+                            }
+                            if (mm_flash_ops_cut_fired(0)) {
+                                /* Power is off: run nothing more. */
+                                done = MM_TRUE;
+                                break;
+                            }
                             if (tb_bkpt_hit) {
                                 printf("[BKPT] imm=0x%02lx\n", (unsigned long)tb_bkpt_imm);
                                 if (opt_expect_bkpt) {
@@ -7252,6 +7299,17 @@ check_irq_pending:
                     mm_bool trace_started = MM_FALSE;
                     mm_bool fault_skip = MM_FALSE;
                     (void)pc_before_exec;
+                    {
+                        /* the previous instruction's flash operation, if any */
+                        mm_u64 stall = flash_stall_cycles(cpu_hz);
+                        if (stall != 0u) {
+                            cycles_since_poll += stall;
+                            cycle_total += stall;
+                            vcycles += stall;
+                            mm_scs_systick_advance(&scs, stall);
+                            mm_timer_tick(&cfg, stall);
+                        }
+                    }
                     cycles_since_poll += insn_cycles;
                     cycle_total += insn_cycles;
                     vcycles += insn_cycles;
