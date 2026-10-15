@@ -64,6 +64,24 @@ Start the built\-in GDB remote serial protocol server on port 1234.
 Use this when you want to connect
 .BR gdb (1)
 to the emulated target without additional debug hardware.
+
+Besides
+.BR "monitor info" ,
+.BR reset ,
+.BR quit ,
+.B capstone
+and
+.BR fault-clock ,
+the server takes monitor commands for test harnesses:
+.B vtime
+and
+.B run-for
+for virtual time,
+.BR power-cycle ,
+.B flash
+(ops, cut, trace, timing, load, save) and
+.B uart
+(attach, read, write). See docs/gdb-monitor.md. While no breakpoint, step or fault clock is pending, the core keeps its fast execution path under the debugger.
 .TP
 .BR --port " " <n>
 Override the GDB server port used by

@@ -28,6 +28,7 @@
 #include "m33mu/cpu.h"
 #include "m33mu/memmap.h"
 #include "m33mu/flash_ops.h"
+#include "m33mu/uart_capture.h"
 #include "m33mu/covdump.h"
 #include "m33mu/vector.h"
 #include "m33mu/scs.h"
@@ -5999,6 +6000,14 @@ int main(int argc, char **argv)
         }
         }
     }
+    if (opt_gdb && boot_mode == MM_BOOT_FLASH && opt_flash_trace == 0 &&
+        opt_flash_cut == MM_FLASH_OPS_NEVER && !opt_flash_cut_erase &&
+        opt_flash_timing == MM_FLASH_TIMING_NONE) {
+        /* counted, so that the debugger's monitor flash commands work */
+        if (mm_flash_ops_enable(flash, cfg.flash_size_s, cfg.flash_base_s)) {
+            mm_flash_persist_watch(&persist, flash, cfg.flash_size_s);
+        }
+    }
     if (opt_flash_trace != 0 || opt_flash_cut != MM_FLASH_OPS_NEVER || opt_flash_cut_erase ||
         opt_flash_timing != MM_FLASH_TIMING_NONE) {
         if (boot_mode != MM_BOOT_FLASH || !mm_flash_ops_enable(flash, cfg.flash_size_s, cfg.flash_base_s)) {
@@ -6024,6 +6033,7 @@ int main(int argc, char **argv)
     }
 
     mm_gdb_stub_init(&gdb);
+    gdb.flash_timing = cfg.flash_timing;
     if (opt_fault_clock_count > 0u) {
         mm_u8 i;
         if (opt_fault_clock_count > (mm_u8)(sizeof(gdb.fault_clocks) / sizeof(gdb.fault_clocks[0]))) {
@@ -6092,6 +6102,8 @@ int main(int argc, char **argv)
             mm_u64 hz_now = 0;
             mm_u64 last_hz = 0;
             tui_steps_offset = 0;
+            gdb.vcycles = &vcycles;
+            gdb.cpu_hz = cpu_hz;
             if (fault_clock_count > 0u) {
                 mm_u8 i;
                 if (fault_clock_count > (mm_u8)(sizeof(fault_clocks) / sizeof(fault_clocks[0]))) {
@@ -6621,14 +6633,25 @@ int main(int argc, char **argv)
                     sync_granularity = cpu_hz / 100000u;
                     if (sync_granularity == 0) sync_granularity = 1u;
                     printf("[CLOCK] CPU %llu Hz\n", (unsigned long long)cpu_hz);
+                    gdb.cpu_hz = cpu_hz;
                 }
                 if (g_fault_pending) {
                     done = MM_TRUE;
                     break;
                 }
                 if (mm_flash_ops_cut_fired(0)) {
-                    done = MM_TRUE;
-                    break;
+                    /* Power is off. Alone, that ends the run; under a
+                     * debugger the core halts until `monitor power-cycle`. */
+                    if (!opt_gdb) {
+                        done = MM_TRUE;
+                        break;
+                    }
+                    if (mm_gdb_stub_should_run(&gdb)) {
+                        mm_gdb_stub_notify_stop(&gdb, 5);
+                    }
+                }
+                if (opt_gdb && mm_gdb_stub_should_run(&gdb) && mm_gdb_stub_take_deadline(&gdb)) {
+                    mm_gdb_stub_notify_stop(&gdb, 5);
                 }
                 if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
                     reset_again = MM_TRUE;
@@ -6684,6 +6707,21 @@ int main(int argc, char **argv)
                         }
                     }
                     if (mm_gdb_stub_take_reset(&gdb)) {
+                        apply_reset_view(opt_tui ? &tui : 0, &cpu, &map, cycle_total,
+                                         opt_tui ? &tui_steps_offset : 0,
+                                         opt_tui ? &tui_steps_latched : 0);
+                    }
+                    if (mm_gdb_stub_take_power_cycle(&gdb)) {
+                        /* Off and on again: RAM forgets, flash keeps what it
+                         * held (a cut operation stays undone). Operations
+                         * count from 0 again; a cut that fired is spent, one
+                         * still armed waits for this power-up. */
+                        memset(ram, 0, cfg_total_ram(&cfg));
+                        if (mm_flash_ops_cut_fired(0)) {
+                            mm_flash_ops_clear_cut();
+                        }
+                        (void)mm_flash_ops_take_stall_us();
+                        mm_flash_ops_set_count(0u);
                         apply_reset_view(opt_tui ? &tui : 0, &cpu, &map, cycle_total,
                                          opt_tui ? &tui_steps_offset : 0,
                                          opt_tui ? &tui_steps_latched : 0);
@@ -6912,6 +6950,13 @@ int main(int argc, char **argv)
                         continue;
                     } else {
                         mm_u64 delta = mm_scs_systick_cycles_until_fire(&scs);
+                        if (opt_gdb) {
+                            /* do not sleep past a `monitor run-for` deadline */
+                            mm_u64 left = mm_gdb_stub_cycles_to_deadline(&gdb);
+                            if (left != 0u && left < delta) {
+                                delta = left;
+                            }
+                        }
                         if (delta == (mm_u64)-1) {
                             mm_u64 idle_cycles = 0;
                             if (!g_no_realtime) {
@@ -7091,7 +7136,8 @@ check_irq_pending:
                     mm_u32 tb_bkpt_imm = 0;
                     mm_u32 ops_executed = 0;
                     mm_u32 target_idx = 0;
-                    if (opt_gdb || opt_capstone || mm_trace_enabled() || g_call_trace ||
+                    if ((opt_gdb && mm_gdb_stub_needs_precise(&gdb)) || opt_capstone ||
+                        mm_trace_enabled() || g_call_trace ||
                         (opt_tui && mm_tui_debug_has_slots(&tui))) {
                         fast_mode = MM_FALSE;
                     }
@@ -7170,7 +7216,12 @@ check_irq_pending:
                             }
                             if (mm_flash_ops_cut_fired(0)) {
                                 /* Power is off: run nothing more. */
-                                done = MM_TRUE;
+                                if (!opt_gdb) {
+                                    done = MM_TRUE;
+                                }
+                                break;
+                            }
+                            if (opt_gdb && mm_gdb_stub_cycles_to_deadline(&gdb) == 0u) {
                                 break;
                             }
                             if (tb_bkpt_hit) {
@@ -7655,6 +7706,8 @@ check_irq_pending:
                 }
             }
             if (reset_again) {
+                gdb.vtime_base += vcycles;
+                gdb.vcycles = 0;
                 mm_code_cache_release(&code_cache);
                 continue;
             }
@@ -7770,6 +7823,7 @@ cleanup:
         }
         mm_flash_ops_trace_close();
         mm_flash_ops_disable();
+        mm_uart_capture_detach_all();
     }
     if (opt_expect_bkpt && rc == 0) {
         rc = expect_bkpt_hit ? 0 : 1;

@@ -24,6 +24,8 @@
 #include "m33mu/fetch.h"
 #include "m33mu/capstone.h"
 #include "m33mu/code_cache.h"
+#include "m33mu/flash_ops.h"
+#include "m33mu/uart_capture.h"
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -32,6 +34,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <poll.h>
 #include <limits.h>
 #include <stdio.h>
@@ -229,6 +232,13 @@ void mm_gdb_stub_init(struct mm_gdb_stub *stub)
     stub->rearm_addr = 0;
     stub->exec_path[0] = '\0';
     stub->cpu_name[0] = '\0';
+    stub->vcycles = 0;
+    stub->vtime_base = 0u;
+    stub->cpu_hz = 0u;
+    stub->run_deadline_set = MM_FALSE;
+    stub->run_deadline = 0u;
+    stub->request_power_cycle = MM_FALSE;
+    stub->flash_timing = 0;
 }
 
 void mm_gdb_stub_set_exec_path(struct mm_gdb_stub *stub, const char *path)
@@ -275,6 +285,37 @@ mm_bool mm_gdb_stub_take_quit(struct mm_gdb_stub *stub)
     v = stub->request_quit;
     stub->request_quit = MM_FALSE;
     return v;
+}
+
+mm_bool mm_gdb_stub_take_power_cycle(struct mm_gdb_stub *stub)
+{
+    mm_bool v;
+    if (stub == 0) return MM_FALSE;
+    v = stub->request_power_cycle;
+    stub->request_power_cycle = MM_FALSE;
+    return v;
+}
+
+mm_u64 mm_gdb_stub_vtime(const struct mm_gdb_stub *stub)
+{
+    if (stub == 0) return 0u;
+    return stub->vtime_base + ((stub->vcycles != 0) ? *stub->vcycles : 0u);
+}
+
+mm_u64 mm_gdb_stub_cycles_to_deadline(const struct mm_gdb_stub *stub)
+{
+    mm_u64 now;
+    if (stub == 0 || !stub->run_deadline_set) return (mm_u64)-1;
+    now = mm_gdb_stub_vtime(stub);
+    return (now >= stub->run_deadline) ? 0u : stub->run_deadline - now;
+}
+
+mm_bool mm_gdb_stub_take_deadline(struct mm_gdb_stub *stub)
+{
+    if (stub == 0 || !stub->run_deadline_set) return MM_FALSE;
+    if (mm_gdb_stub_vtime(stub) < stub->run_deadline) return MM_FALSE;
+    stub->run_deadline_set = MM_FALSE;
+    return MM_TRUE;
 }
 
 mm_bool mm_gdb_stub_start(struct mm_gdb_stub *stub, int port)
@@ -330,6 +371,12 @@ mm_bool mm_gdb_stub_wait_client(struct mm_gdb_stub *stub)
         }
         perror("accept");
         return MM_FALSE;
+    }
+    {
+        /* Small request/reply packets: do not let Nagle hold them back
+         * waiting for the peer's delayed ACK. */
+        int one = 1;
+        (void)setsockopt(cfd, IPPROTO_TCP, TCP_NODELAY, (const char *)&one, sizeof(one));
     }
     stub->client_fd = cfd;
     stub->connected = MM_TRUE;
@@ -867,6 +914,20 @@ mm_bool mm_gdb_stub_breakpoint_hit(const struct mm_gdb_stub *stub, mm_u32 pc)
     return MM_FALSE;
 }
 
+mm_bool mm_gdb_stub_needs_precise(const struct mm_gdb_stub *stub)
+{
+    size_t i;
+    if (stub == 0) return MM_FALSE;
+    if (stub->step_pending || stub->reverse_exec || stub->fault_clock_count != 0u ||
+        stub->rearm_valid) {
+        return MM_TRUE;
+    }
+    for (i = 0; i < sizeof(stub->breakpoints) / sizeof(stub->breakpoints[0]); ++i) {
+        if (stub->breakpoints[i].valid) return MM_TRUE;
+    }
+    return MM_FALSE;
+}
+
 mm_bool mm_gdb_stub_should_run(const struct mm_gdb_stub *stub)
 {
     return stub->running;
@@ -1019,6 +1080,254 @@ mm_bool mm_gdb_stub_poll(struct mm_gdb_stub *stub, int timeout_ms)
     return MM_FALSE;
 }
 
+/* ---- Test-harness monitor commands (docs/gdb-monitor.md) ----
+ *
+ * Replies: zero or more console lines, then "OK", or "E01" after an
+ * "error: ..." console line. */
+
+static void harness_reply_error(struct mm_gdb_stub *stub, const char *msg)
+{
+    char line[320];
+    snprintf(line, sizeof(line), "error: %s\n", msg);
+    gdb_send_console(stub, line);
+    gdb_send_packet(stub->client_fd, "E01");
+}
+
+static void harness_reply(struct mm_gdb_stub *stub, const char *line)
+{
+    if (line != 0) gdb_send_console(stub, line);
+    gdb_send_packet(stub->client_fd, "OK");
+}
+
+static mm_bool harness_parse_u64(const char *s, mm_u64 *out)
+{
+    char *end;
+    unsigned long long v;
+    if (s == 0 || *s == '\0') return MM_FALSE;
+    errno = 0;
+    v = strtoull(s, &end, 0);
+    if (errno != 0 || end == s || (*end != '\0' && *end != ' ')) return MM_FALSE;
+    *out = (mm_u64)v;
+    return MM_TRUE;
+}
+
+static void harness_note_flash_rewrite(struct mm_memmap *map)
+{
+    mm_u32 size = mm_flash_ops_size();
+    if (map == 0 || map->code_cache == 0 || size == 0u) return;
+    mm_code_cache_note_write(map->code_cache, map->flash_base_s, size);
+    if (map->flash_base_ns != map->flash_base_s) {
+        mm_code_cache_note_write(map->code_cache, map->flash_base_ns, size);
+    }
+}
+
+static void harness_flash(struct mm_gdb_stub *stub, struct mm_memmap *map, const char *args)
+{
+    char line[256];
+    mm_u64 v;
+    if (!mm_flash_ops_enabled()) {
+        harness_reply_error(stub, "flash operations are not tracked (flash boot only)");
+        return;
+    }
+    if (strcmp(args, "ops") == 0) {
+        snprintf(line, sizeof(line), "flash ops %llu\n", (unsigned long long)mm_flash_ops_count());
+        harness_reply(stub, line);
+    } else if (strcmp(args, "ops reset") == 0) {
+        mm_flash_ops_set_count(0u);
+        harness_reply(stub, 0);
+    } else if (strcmp(args, "cut off") == 0) {
+        mm_flash_ops_clear_cut();
+        harness_reply(stub, 0);
+    } else if (strcmp(args, "cut status") == 0) {
+        struct mm_flash_cut cut;
+        if (mm_flash_ops_cut_fired(&cut)) {
+            snprintf(line, sizeof(line), "flash cut %llu %s 0x%08lx 0x%lx\n",
+                     (unsigned long long)cut.index,
+                     cut.kind == MM_FLASH_OP_PROGRAM ? "program" :
+                     cut.kind == MM_FLASH_OP_ERASE ? "erase" :
+                     cut.kind == MM_FLASH_OP_MASS_ERASE ? "mass-erase" : "bulk",
+                     (unsigned long)cut.addr, (unsigned long)cut.len);
+        } else {
+            snprintf(line, sizeof(line), "flash cut none\n");
+        }
+        harness_reply(stub, line);
+    } else if (strncmp(args, "cut erase ", 10) == 0) {
+        if (!harness_parse_u64(args + 10, &v) || v > 0xFFFFFFFFull) {
+            harness_reply_error(stub, "flash cut erase: bad address");
+            return;
+        }
+        mm_flash_ops_cut_on_erase((mm_u32)v);
+        harness_reply(stub, 0);
+    } else if (strncmp(args, "cut ", 4) == 0) {
+        if (!harness_parse_u64(args + 4, &v)) {
+            harness_reply_error(stub, "flash cut: bad operation number");
+            return;
+        }
+        mm_flash_ops_cut_at(v);
+        harness_reply(stub, 0);
+    } else if (strcmp(args, "trace off") == 0) {
+        mm_flash_ops_trace_close();
+        harness_reply(stub, 0);
+    } else if (strncmp(args, "trace ", 6) == 0) {
+        if (!mm_flash_ops_trace_open(args + 6)) {
+            harness_reply_error(stub, "flash trace: cannot open file");
+            return;
+        }
+        harness_reply(stub, 0);
+    } else if (strncmp(args, "timing ", 7) == 0) {
+        enum mm_flash_timing_level level;
+        if (strcmp(args + 7, "none") == 0) {
+            level = MM_FLASH_TIMING_NONE;
+        } else if (strcmp(args + 7, "typical") == 0) {
+            level = MM_FLASH_TIMING_TYPICAL;
+        } else if (strcmp(args + 7, "max") == 0) {
+            level = MM_FLASH_TIMING_MAX;
+        } else {
+            harness_reply_error(stub, "flash timing: none, typical or max");
+            return;
+        }
+        if (level != MM_FLASH_TIMING_NONE && stub->flash_timing == 0) {
+            harness_reply_error(stub, "flash timing: no data for this cpu");
+            return;
+        }
+        mm_flash_ops_set_timing(stub->flash_timing, level);
+        harness_reply(stub, 0);
+    } else if (strncmp(args, "load ", 5) == 0) {
+        if (!mm_flash_ops_load_file(args + 5)) {
+            harness_reply_error(stub, "flash load: cannot read file, or larger than flash");
+            return;
+        }
+        harness_note_flash_rewrite(map);
+        harness_reply(stub, 0);
+    } else if (strncmp(args, "save ", 5) == 0) {
+        if (!mm_flash_ops_save_file(args + 5)) {
+            harness_reply_error(stub, "flash save: cannot write file");
+            return;
+        }
+        harness_reply(stub, 0);
+    } else if (strcmp(args, "info") == 0) {
+        snprintf(line, sizeof(line), "flash 0x%08lx 0x%lx\n",
+                 (unsigned long)mm_flash_ops_base(), (unsigned long)mm_flash_ops_size());
+        harness_reply(stub, line);
+    } else {
+        harness_reply_error(stub, "flash: unknown command");
+    }
+}
+
+static int hex_nibble(char c)
+{
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+static void harness_uart(struct mm_gdb_stub *stub, const char *args)
+{
+    char verb[16];
+    char rest[256];
+    mm_u64 base;
+    int n;
+    rest[0] = '\0';
+    n = sscanf(args, "%15s %255[^\n]", verb, rest);
+    if (n < 2) {
+        harness_reply_error(stub, "uart: attach|read|write <base> ...");
+        return;
+    }
+    if (!harness_parse_u64(rest, &base) || base > 0xFFFFFFFFull) {
+        harness_reply_error(stub, "uart: bad base address");
+        return;
+    }
+    if (strcmp(verb, "attach") == 0) {
+        if (!mm_uart_capture_attach((mm_u32)base)) {
+            harness_reply_error(stub, "uart attach: no free slot, or another backend owns it");
+            return;
+        }
+        harness_reply(stub, 0);
+    } else if (strcmp(verb, "read") == 0) {
+        /* "uart <bytes still pending> <hex>", hex "-" when empty; at most
+         * 256 bytes per reply, ask again while pending is not 0 */
+        mm_u8 data[256];
+        char line[16 + 2u * sizeof(data) + 32u];
+        size_t got = mm_uart_capture_take((mm_u32)base, data, sizeof(data));
+        size_t i;
+        int pos = snprintf(line, sizeof(line), "uart %lu ",
+                           (unsigned long)mm_uart_capture_pending((mm_u32)base));
+        for (i = 0; i < got; ++i) {
+            pos += snprintf(line + pos, sizeof(line) - (size_t)pos, "%02x", data[i]);
+        }
+        snprintf(line + pos, sizeof(line) - (size_t)pos, "%s\n", got == 0u ? "-" : "");
+        harness_reply(stub, line);
+    } else if (strcmp(verb, "write") == 0) {
+        const char *hex = strchr(rest, ' ');
+        mm_u8 data[128];
+        size_t len = 0;
+        if (hex == 0) {
+            harness_reply_error(stub, "uart write: <base> <hex>");
+            return;
+        }
+        ++hex;
+        while (hex[0] != '\0' && hex[1] != '\0' && len < sizeof(data)) {
+            int hi = hex_nibble(hex[0]);
+            int lo = hex_nibble(hex[1]);
+            if (hi < 0 || lo < 0) break;
+            data[len++] = (mm_u8)((hi << 4) | lo);
+            hex += 2;
+        }
+        if (hex[0] != '\0' || len == 0u) {
+            harness_reply_error(stub, "uart write: hex bytes, at most 128");
+            return;
+        }
+        if (!mm_uart_capture_inject((mm_u32)base, data, len)) {
+            harness_reply_error(stub, "uart write: not attached, or receive queue full");
+            return;
+        }
+        harness_reply(stub, 0);
+    } else {
+        harness_reply_error(stub, "uart: attach|read|write <base> ...");
+    }
+}
+
+/* Returns MM_FALSE when `cmd` is not one of these commands. */
+static mm_bool gdb_monitor_harness(struct mm_gdb_stub *stub, struct mm_memmap *map, const char *cmd)
+{
+    char line[128];
+    mm_u64 v;
+    if (strncmp(cmd, "monitor ", 8) == 0) cmd += 8;
+
+    if (strcmp(cmd, "vtime") == 0) {
+        snprintf(line, sizeof(line), "vtime %llu %llu\n",
+                 (unsigned long long)mm_gdb_stub_vtime(stub),
+                 (unsigned long long)stub->cpu_hz);
+        harness_reply(stub, line);
+    } else if (strcmp(cmd, "run-for off") == 0) {
+        stub->run_deadline_set = MM_FALSE;
+        harness_reply(stub, 0);
+    } else if (strncmp(cmd, "run-for ", 8) == 0) {
+        if (!harness_parse_u64(cmd + 8, &v)) {
+            harness_reply_error(stub, "run-for: microseconds of virtual time");
+            return MM_TRUE;
+        }
+        if (stub->cpu_hz == 0u) {
+            harness_reply_error(stub, "run-for: core clock unknown");
+            return MM_TRUE;
+        }
+        stub->run_deadline = mm_gdb_stub_vtime(stub) + (v * stub->cpu_hz) / 1000000u;
+        stub->run_deadline_set = MM_TRUE;
+        harness_reply(stub, 0);
+    } else if (strcmp(cmd, "power-cycle") == 0) {
+        stub->request_power_cycle = MM_TRUE;
+        harness_reply(stub, 0);
+    } else if (strncmp(cmd, "flash ", 6) == 0) {
+        harness_flash(stub, map, cmd + 6);
+    } else if (strncmp(cmd, "uart ", 5) == 0) {
+        harness_uart(stub, cmd + 5);
+    } else {
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
 void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_memmap *map)
 {
     char buf[GDB_BUF_SIZE];
@@ -1139,6 +1448,8 @@ void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_
                     gdb_send_console(stub, "fault-clock added\n");
                     gdb_send_packet(stub->client_fd, "OK");
                 }
+            } else if (gdb_monitor_harness(stub, map, cmd)) {
+                /* replied */
             } else {
                 gdb_send_packet(stub->client_fd, "OK");
             }

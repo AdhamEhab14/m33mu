@@ -86,6 +86,58 @@ void mm_flash_ops_resync(void)
     memcpy(ops.shadow, ops.flash, ops.size);
 }
 
+mm_u32 mm_flash_ops_base(void)
+{
+    return ops.base;
+}
+
+mm_u32 mm_flash_ops_size(void)
+{
+    return ops.size;
+}
+
+mm_bool mm_flash_ops_load_file(const char *path)
+{
+    FILE *f;
+    mm_u8 *buf;
+    size_t n;
+    int extra;
+    if (!ops.enabled || path == 0) return MM_FALSE;
+    f = fopen(path, "rb");
+    if (f == 0) return MM_FALSE;
+    buf = (mm_u8 *)malloc(ops.size);
+    if (buf == 0) {
+        fclose(f);
+        return MM_FALSE;
+    }
+    memset(buf, 0xFF, ops.size);
+    n = fread(buf, 1, ops.size, f);
+    extra = fgetc(f);
+    fclose(f);
+    if (extra != EOF) {
+        /* larger than the array: refuse rather than load part of it */
+        free(buf);
+        return MM_FALSE;
+    }
+    (void)n;
+    memcpy(ops.flash, buf, ops.size);
+    memcpy(ops.shadow, buf, ops.size);
+    free(buf);
+    return MM_TRUE;
+}
+
+mm_bool mm_flash_ops_save_file(const char *path)
+{
+    FILE *f;
+    size_t n;
+    if (!ops.enabled || path == 0) return MM_FALSE;
+    f = fopen(path, "wb");
+    if (f == 0) return MM_FALSE;
+    n = fwrite(ops.flash, 1, ops.size, f);
+    if (fclose(f) != 0 || n != ops.size) return MM_FALSE;
+    return MM_TRUE;
+}
+
 static mm_bool all_erased(const mm_u8 *p, mm_u32 len)
 {
     mm_u32 i;

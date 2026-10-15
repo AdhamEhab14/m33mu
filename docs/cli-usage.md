@@ -32,7 +32,7 @@ build/m33mu --gdb --gdb-symbols firmware.elf firmware.bin
 
 - `--cpu <cpu>`: select the MCU/SoC profile
 - `--tui`: start the interactive ncurses UI. Press F9 to switch between the emulator and built-in debugger views.
-- `--gdb`: expose a GDB remote server on port `1234`
+- `--gdb`: expose a GDB remote server on port `1234`. Besides `monitor info`, `reset`, `quit`, `capstone` and `fault-clock`, it takes monitor commands for test harnesses (virtual time, power cycling, flash operations, UART capture): see [GDB monitor commands](gdb-monitor.md)
 - `--port <n>`: override the GDB port
 - `--gdb-symbols <elf>`: load debug symbols from one or more ELFs
 

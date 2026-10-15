@@ -573,6 +573,7 @@ add_custom_target(firmware-build
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-uart-echo app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-flash-tz app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-no-realtime app.bin
+  COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-gdb-harness app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h5f4-uart-echo app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32h563-wolfssl-iotsafe app.bin
   COMMAND ${CMAKE_MAKE_PROGRAM} -C tests/firmware/test-stm32u585 app.bin
@@ -610,6 +611,17 @@ add_test(NAME flash_tz_hw_parity_test
 set_tests_properties(flash_tz_hw_parity_test PROPERTIES
   WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
 )
+
+# The GDB monitor commands, driven as a power-cut harness would. Builds its
+# firmware when a cross toolchain is around and skips itself otherwise.
+find_program(M33MU_PYTHON3 python3)
+if(M33MU_PYTHON3)
+  add_test(NAME gdb_harness_test
+    COMMAND "${M33MU_PYTHON3}" -I "${CMAKE_SOURCE_DIR}/scripts/gdb-harness-test.py" "$<TARGET_FILE:m33mu>")
+  set_tests_properties(gdb_harness_test PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}"
+  )
+endif()
 
 # --no-realtime against the default pacing. Builds its firmware when a cross
 # toolchain is around and skips itself otherwise.

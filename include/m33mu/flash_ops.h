@@ -81,6 +81,15 @@ mm_bool mm_flash_ops_enabled(void);
  * load, a debugger write): take it as it is now. */
 void mm_flash_ops_resync(void);
 
+mm_u32 mm_flash_ops_base(void);
+mm_u32 mm_flash_ops_size(void);
+
+/* The whole array to or from a raw file, offset 0 first. A shorter file
+ * loads into the start of the array and leaves the rest erased (0xFF). A
+ * load is not an operation: it is taken as the array's new contents. */
+mm_bool mm_flash_ops_load_file(const char *path);
+mm_bool mm_flash_ops_save_file(const char *path);
+
 /* Called for every operation, after the port applied it to the array.
  * Returns MM_FALSE when this is the operation to cut at, or any operation
  * after it (the power is off): the range is put back as it was. */

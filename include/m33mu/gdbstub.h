@@ -26,6 +26,8 @@
 #include "m33mu/cpu.h"
 #include "m33mu/memmap.h"
 
+struct mm_flash_timing;
+
 struct mm_gdb_stub {
     int listen_fd;
     int client_fd;
@@ -51,6 +53,16 @@ struct mm_gdb_stub {
     mm_u32 rearm_addr;
     char exec_path[256];
     char cpu_name[64];
+    /* Test-harness monitor commands (docs/gdb-monitor.md). The run loop
+     * points vcycles at the current run's counter, adds it to vtime_base
+     * at each reset, and keeps cpu_hz current. */
+    mm_u64 *vcycles;
+    mm_u64 vtime_base;
+    mm_u64 cpu_hz;
+    mm_bool run_deadline_set;
+    mm_u64 run_deadline;
+    mm_bool request_power_cycle;
+    const struct mm_flash_timing *flash_timing;
 };
 
 void mm_gdb_stub_init(struct mm_gdb_stub *stub);
@@ -61,6 +73,10 @@ void mm_gdb_stub_notify_stop(struct mm_gdb_stub *stub, int sig);
 void mm_gdb_stub_close(struct mm_gdb_stub *stub);
 void mm_gdb_stub_handle(struct mm_gdb_stub *stub, struct mm_cpu *cpu, struct mm_memmap *map);
 mm_bool mm_gdb_stub_should_run(const struct mm_gdb_stub *stub);
+/* MM_TRUE while something needs instruction-by-instruction execution:
+ * breakpoints, a step, reverse execution, fault clocks. Otherwise the run
+ * loop may use its translation-block fast path under a debugger too. */
+mm_bool mm_gdb_stub_needs_precise(const struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_should_step(const struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_is_reverse(const struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_breakpoint_hit(const struct mm_gdb_stub *stub, mm_u32 pc);
@@ -70,5 +86,13 @@ mm_bool mm_gdb_stub_poll(struct mm_gdb_stub *stub, int timeout_ms);
 void mm_gdb_stub_set_cpu_name(struct mm_gdb_stub *stub, const char *name);
 mm_bool mm_gdb_stub_take_reset(struct mm_gdb_stub *stub);
 mm_bool mm_gdb_stub_take_quit(struct mm_gdb_stub *stub);
+mm_bool mm_gdb_stub_take_power_cycle(struct mm_gdb_stub *stub);
+/* Virtual cycles since start, across resets. */
+mm_u64 mm_gdb_stub_vtime(const struct mm_gdb_stub *stub);
+/* Cycles left before the `monitor run-for` deadline, or (mm_u64)-1 when
+ * none is set. */
+mm_u64 mm_gdb_stub_cycles_to_deadline(const struct mm_gdb_stub *stub);
+/* MM_TRUE once when the deadline is reached; clears it. */
+mm_bool mm_gdb_stub_take_deadline(struct mm_gdb_stub *stub);
 
 #endif /* M33MU_GDBSTUB_H */
