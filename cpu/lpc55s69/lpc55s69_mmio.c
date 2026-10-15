@@ -491,6 +491,8 @@ static mm_u32 flash_ctrl_regs[FLASH_CTRL_SIZE / 4u];
 static mm_u8 flash_blank_bits[FLASH_ECC_BITMAP_BYTES];
 /* Pointer to the flash buffer (set by flash_bind) */
 static mm_u8 *flash_buf = 0;
+/* --persist backing for the flash buffer (set by flash_bind) */
+static const struct mm_flash_persist *flash_persist = 0;
 
 /* ---- Blank bitmap helpers ---- */
 
@@ -544,6 +546,13 @@ void mm_lpc55s69_flash_mark_programmed(mm_u32 offset, mm_u32 len)
     }
 }
 
+void mm_lpc55s69_flash_persist(mm_u32 offset, mm_u32 len)
+{
+    if (flash_persist != 0 && flash_persist->enabled) {
+        mm_flash_persist_flush((struct mm_flash_persist *)flash_persist, offset, len);
+    }
+}
+
 /* ---- Flash controller CMD execution ---- */
 
 static void flash_ctrl_exec_cmd(mm_u32 cmd)
@@ -586,6 +595,7 @@ static void flash_ctrl_exec_cmd(mm_u32 cmd)
         for (i = page_start; i <= page_end && i < flash_size_words; ++i) {
             flash_blank_set(i);
         }
+        mm_lpc55s69_flash_persist(page_start * FC_ECC_WORD_BYTES, 32u * FC_ECC_WORD_BYTES);
         break;
     }
 
@@ -604,6 +614,7 @@ static void flash_ctrl_exec_cmd(mm_u32 cmd)
                 ;
             }
             flash_blank_clear(starta);
+            mm_lpc55s69_flash_persist(byte_off, FC_ECC_WORD_BYTES);
         }
         break;
 
@@ -1510,10 +1521,10 @@ void mm_lpc55s69_flash_bind(struct mm_memmap *map,
     mm_u32 j;
     mm_bool all_ff;
 
-    (void)persist;
     (void)flags;
 
     flash_buf = flash;
+    flash_persist = persist;
 
     /* Wire the memory-map pointer into CASPER so it can read operands from RAM */
     casper_state.map = map;

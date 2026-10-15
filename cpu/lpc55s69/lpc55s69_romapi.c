@@ -346,6 +346,7 @@ static mm_u32 romapi_flash_erase(struct mm_cpu *cpu, struct mm_memmap *map)
     }
     /* Update blank bitmap: all erased words are now blank */
     mm_lpc55s69_flash_mark_blank(flash_off, len);
+    mm_lpc55s69_flash_persist(flash_off, len);
     return STATUS_FLASH_SUCCESS;
 }
 
@@ -365,6 +366,7 @@ static mm_u32 romapi_flash_program(struct mm_cpu *cpu, struct mm_memmap *map)
     }
     /* Update blank bitmap: programmed words are no longer blank */
     mm_lpc55s69_flash_mark_programmed(flash_off, len);
+    mm_lpc55s69_flash_persist(flash_off, len);
     return STATUS_FLASH_SUCCESS;
 }
 

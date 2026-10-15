@@ -31,6 +31,7 @@ mm_bool mm_lpc55s69_mpcbb_block_secure(int bank, mm_u32 block_index);
  */
 void mm_lpc55s69_flash_mark_blank(mm_u32 offset, mm_u32 len);
 void mm_lpc55s69_flash_mark_programmed(mm_u32 offset, mm_u32 len);
+void mm_lpc55s69_flash_persist(mm_u32 offset, mm_u32 len);
 
 /*
  * Returns MM_TRUE when the peripheral at the given AHBCLKCTRL register offset
