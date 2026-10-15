@@ -46,5 +46,9 @@ void mm_flash_persist_build(struct mm_flash_persist *persist,
                             const mm_u32 *offsets,
                             int count);
 void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u32 size);
+/* Enable with no backing files, unless already enabled: the ports then
+ * report every flash operation (see m33mu/flash_ops.h) without writing any
+ * file back. */
+void mm_flash_persist_watch(struct mm_flash_persist *persist, mm_u8 *flash, mm_u32 flash_size);
 
 #endif /* M33MU_FLASH_PERSIST_H */

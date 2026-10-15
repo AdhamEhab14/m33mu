@@ -27,6 +27,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "m33mu/flash_persist.h"
+#include "m33mu/flash_ops.h"
 
 static void persist_close(struct mm_flash_persist *persist)
 {
@@ -174,6 +175,9 @@ void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u3
     if (size == 0u) {
         return;
     }
+    /* Every port calls this once per erase or program it applied: the one
+     * place an operation can be counted, traced, or cut (undone). */
+    (void)mm_flash_ops_note(addr, size);
     for (i = 0; i < persist->count; ++i) {
         mm_u32 start = persist->ranges[i].offset;
         mm_u32 end = start + persist->ranges[i].length;
@@ -204,4 +208,15 @@ void mm_flash_persist_flush(struct mm_flash_persist *persist, mm_u32 addr, mm_u3
             }
         }
     }
+}
+
+void mm_flash_persist_watch(struct mm_flash_persist *persist, mm_u8 *flash, mm_u32 flash_size)
+{
+    if (persist == 0 || persist->enabled) {
+        return;
+    }
+    memset(persist, 0, sizeof(*persist));
+    persist->enabled = MM_TRUE;
+    persist->flash = flash;
+    persist->flash_size = flash_size;
 }

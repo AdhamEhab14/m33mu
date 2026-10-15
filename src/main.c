@@ -27,6 +27,7 @@
 #include "m33mu/target.h"
 #include "m33mu/cpu.h"
 #include "m33mu/memmap.h"
+#include "m33mu/flash_ops.h"
 #include "m33mu/covdump.h"
 #include "m33mu/vector.h"
 #include "m33mu/scs.h"
@@ -4962,6 +4963,10 @@ int main(int argc, char **argv)
     mm_bool opt_covdump_success_only = MM_FALSE;
     mm_bool opt_tui = MM_FALSE;
     mm_bool opt_persist = MM_FALSE;
+    const char *opt_flash_trace = 0;
+    mm_u64 opt_flash_cut = MM_FLASH_OPS_NEVER;
+    mm_bool opt_flash_cut_erase = MM_FALSE;
+    mm_u32 opt_flash_cut_erase_addr = 0u;
     mm_bool opt_quit_on_faults = MM_FALSE;
     mm_bool opt_capstone = MM_FALSE;
     mm_bool opt_capstone_verbose = MM_FALSE;
@@ -5159,6 +5164,25 @@ int main(int argc, char **argv)
             opt_persist = MM_TRUE;
         } else if (strcmp(argv[i], "--no-realtime") == 0) {
             g_no_realtime = MM_TRUE;
+        } else if (strcmp(argv[i], "--flash-trace") == 0 && i + 1 < argc) {
+            opt_flash_trace = argv[i + 1];
+            i++;
+        } else if (strcmp(argv[i], "--flash-cut") == 0 && i + 1 < argc) {
+            char *end;
+            unsigned long long n = strtoull(argv[i + 1], &end, 0);
+            if (end == argv[i + 1] || *end != '\0') {
+                fprintf(stderr, "invalid flash-cut operation: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_flash_cut = (mm_u64)n;
+            i++;
+        } else if (strcmp(argv[i], "--flash-cut-erase") == 0 && i + 1 < argc) {
+            if (!parse_u32(argv[i + 1], &opt_flash_cut_erase_addr)) {
+                fprintf(stderr, "invalid flash-cut-erase address: %s\n", argv[i + 1]);
+                return 1;
+            }
+            opt_flash_cut_erase = MM_TRUE;
+            i++;
         } else if (strcmp(argv[i], "--puf-seed") == 0 && i + 1 < argc) {
             if (!parse_hex_u64(argv[i + 1], &opt_puf_seed)) {
                 fprintf(stderr, "invalid puf seed value: %s\n", argv[i + 1]);
@@ -5595,6 +5619,7 @@ int main(int argc, char **argv)
                         "[--tui] "
 #endif
                         "[--persist] [--no-realtime] "
+                        "[--flash-trace <file>] [--flash-cut <n>] [--flash-cut-erase <addr>] "
                         "[--puf-seed <value>] [--puf-cold-boot <n>] [--puf-noise <n>] "
                         "[--sbkload-key <hex>] "
 #ifdef M33MU_USE_LIBCAPSTONE
@@ -5948,6 +5973,23 @@ int main(int argc, char **argv)
         }
         }
     }
+    if (opt_flash_trace != 0 || opt_flash_cut != MM_FLASH_OPS_NEVER || opt_flash_cut_erase) {
+        if (boot_mode != MM_BOOT_FLASH || !mm_flash_ops_enable(flash, cfg.flash_size_s, cfg.flash_base_s)) {
+            fprintf(stderr, "flash operation tracking needs flash boot\n");
+            rc = 1;
+            goto cleanup;
+        }
+        mm_flash_persist_watch(&persist, flash, cfg.flash_size_s);
+        if (opt_flash_trace != 0 && !mm_flash_ops_trace_open(opt_flash_trace)) {
+            fprintf(stderr, "cannot open flash trace %s\n", opt_flash_trace);
+            rc = 1;
+            goto cleanup;
+        }
+        mm_flash_ops_cut_at(opt_flash_cut);
+        if (opt_flash_cut_erase) {
+            mm_flash_ops_cut_on_erase(opt_flash_cut_erase_addr);
+        }
+    }
 
     mm_gdb_stub_init(&gdb);
     if (opt_fault_clock_count > 0u) {
@@ -6191,7 +6233,7 @@ int main(int argc, char **argv)
                 goto cleanup;
             }
             mm_spiflash_register_mmap_regions(&map.mmio);
-            mm_target_flash_bind(&cfg, &map, flash, cfg.flash_size_s, opt_persist ? &persist : 0);
+            mm_target_flash_bind(&cfg, &map, flash, cfg.flash_size_s, persist.enabled ? &persist : 0);
             mm_target_usart_reset(&cfg);
             mm_target_usart_init(&cfg, &map.mmio, &nvic);
             mm_target_spi_reset(&cfg);
@@ -6552,6 +6594,10 @@ int main(int argc, char **argv)
                     done = MM_TRUE;
                     break;
                 }
+                if (mm_flash_ops_cut_fired(0)) {
+                    done = MM_TRUE;
+                    break;
+                }
                 if (mm_system_reset_pending() && allow_system_reset(&cfg, cpu_name)) {
                     reset_again = MM_TRUE;
                     mm_system_clear_reset();
@@ -6781,6 +6827,7 @@ int main(int argc, char **argv)
                             }
                         }
                         build_symbol_db(images, image_count, gdb_symbols_list, gdb_symbols_count);
+                        mm_flash_ops_resync();
                         mm_system_request_reset();
                     }
                     reload_pending = MM_FALSE;
@@ -7650,6 +7697,21 @@ cleanup:
     if (g_record_trace_fp != NULL) {
         fclose(g_record_trace_fp);
         g_record_trace_fp = NULL;
+    }
+    {
+        struct mm_flash_cut cut;
+        if (mm_flash_ops_cut_fired(&cut)) {
+            printf("[FLASH] power cut before operation %llu: %s at 0x%08lx, %lu bytes\n",
+                   (unsigned long long)cut.index, mm_flash_op_kind_name(cut.kind),
+                   (unsigned long)cut.addr, (unsigned long)cut.len);
+            if (rc == 0) {
+                rc = 3;
+            }
+        } else if (mm_flash_ops_enabled()) {
+            printf("[FLASH] %llu operations\n", (unsigned long long)mm_flash_ops_count());
+        }
+        mm_flash_ops_trace_close();
+        mm_flash_ops_disable();
     }
     if (opt_expect_bkpt && rc == 0) {
         rc = expect_bkpt_hit ? 0 : 1;

@@ -295,6 +295,45 @@ Write modified flash contents back to the original input image files when suppor
 
 This is only supported for flash boot and only for raw BIN inputs. Non\-BIN images or non\-flash boot modes are skipped with warnings.
 .TP
+.BR --flash-trace " " file
+Append one line per flash operation the firmware performs to
+.IR file .
+An operation is what the flash controller (or the ROM API) applies to the array: one program, one erase, one mass erase, or one bulk rewrite of the whole array such as a bank swap. Lines name the bus address as flash base plus offset:
+.RS
+.TP
+.B P addr value
+program; value is the bytes written, little\-endian, two hex digits per byte
+.TP
+.BR "E addr #" len
+erase of len bytes (hex)
+.TP
+.B M addr
+erase of the whole array
+.TP
+.BR "B addr #" len
+bulk rewrite of the whole array (bank swap)
+.RE
+.IP
+The kind is read from the array: a range of 32 bytes or more left all 0xFF is an erase, anything else a program. The run ends with the number of operations performed.
+.TP
+.BR --flash-cut " " n
+Cut the power just before flash operation
+.I n
+(counted from 0 as
+.B --flash-trace
+numbers them): the operation does not happen, the array keeps what it held before it, and the run stops with exit status 3 and a line naming the operation.
+
+With
+.BR --persist ,
+the image files are left in that state, so running the same command line again without the option powers the device back up from the cut. This makes a power\-loss test of an update out of two runs.
+.TP
+.BR --flash-cut-erase " " addr
+Cut the power just before the first erase that covers bus address
+.IR addr ,
+as
+.B --flash-cut
+does.
+.TP
 .BR --capstone
 Enable Capstone\-based cross\-check logging for decode and execute behavior.
 
@@ -540,6 +579,11 @@ Run a firmware test suitable for CI: log UART to stdout, fail if the expected BK
 .TP
 .B m33mu --no-realtime --uart-stdout --expect-bkpt 0x42 --timeout 10 firmware.bin
 The same test with virtual time unpaced: delays, timeouts and idle periods in the firmware cost almost no wall time.
+.TP
+.B m33mu --no-realtime --persist --flash-cut 120 boot.bin app.bin:0x20000
+Run an update and cut the power before its 121st flash operation, leaving the images as the flash was at that moment. Run it again without
+.B --flash-cut
+to check that the device comes back.
 .TP
 .B m33mu --boot spiflash --spiflash:SPI1:file=flash.img:size=0x200000:mmap=0x90000000 firmware.bin
 Attach memory\-mapped SPI flash and boot from it.

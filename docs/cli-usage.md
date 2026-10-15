@@ -164,6 +164,9 @@ Only one Ethernet backend can be selected at a time.
   `0x0C100000`.
 - `--dualbank`: enable STM32 dual-bank flash behavior
 - `--persist`: write modified flash contents back to the original input BINs when supported
+- `--flash-trace <file>`: append one line per flash operation (program, erase, mass erase, or a bulk rewrite such as a bank swap) to `file`: `P <addr> <value>` (value little-endian, two hex digits per byte), `E <addr> #<len>`, `M <addr>`, `B <addr> #<len>`. Addresses are flash base plus offset. Works on every target whose flash is writable, without per-target support: each port already reports the ranges it changes for `--persist`, and the kind is read from the array (a range of 32 bytes or more left all 0xFF is an erase).
+- `--flash-cut <n>`: cut the power just before flash operation `n` (counted from 0, as in the trace). The operation does not happen, the array keeps what it held, and the run stops with exit status 3. With `--persist` the image files are left in that state, so the same command line without `--flash-cut` powers the device up from the cut: a power-loss test in two runs.
+- `--flash-cut-erase <addr>`: cut the power just before the first erase that covers bus address `addr`.
 - `--puf-seed <value>`: fill initial RAM deterministically from a fixed PRNG seed
 - `--puf-cold-boot <n>`: select the deterministic cold-boot index used for PUF noise derivation
 - `--puf-noise <n>`: with `--puf-seed`, flip exactly `n` pseudo-random bits per 127-bit block
