@@ -20,7 +20,9 @@ build/m33mu --cpu stm32h563 --gdb --port 3333 --no-realtime firmware.bin
 Each command answers with zero or more console lines (`O` packets), then `OK`.
 A command that fails prints a line starting with `error:` and answers `E01`.
 `m33mu` sends one stop reply (`S05`) unasked when a client connects; a client
-that does not start with `?` should skip it.
+that does not start with `?` should skip it. A reset while the core runs a
+`run-for` (the firmware resetting itself, a watchdog) does not stop it; other
+resets of a running core stop it with `S05`, as when debugging.
 
 Under a debugger the core runs on the fast translation-block path as long as no
 breakpoint, single step, reverse execution or fault clock is pending, so a
@@ -57,12 +59,28 @@ commands control it at run time.
 | `flash cut status` | `flash cut none`, or `flash cut <n> <program\|erase\|mass-erase\|bulk> <addr> <len>` once a cut fired |
 | `flash trace <file>` / `flash trace off` | append one line per operation to `file` (format in [CLI usage](cli-usage.md)) |
 | `flash timing none\|typical\|max` | as `--flash-timing` |
+| `flash latches` | `flash latches refused <n> <first addr> protected <n> <first addr>`: programs the chip's rules refused, and programs or erases of write-protected flash, since the last power-up. Each is also an operation (traced `X` / `W`, counted, cuttable) that changed nothing |
+| `flash latches clear` | zero them |
 | `flash save <file>` | write the whole flash array to `file` |
 | `flash load <file>` | replace the whole flash array with `file` (a shorter file leaves the rest erased); not an operation, nothing is counted or persisted |
 
 When a cut fires the core halts with `S05`. It stays halted, and every later
 flash operation is undone, until `power-cycle`: a `c` before that stops again
 at once.
+
+## Option bytes
+
+Option bytes live outside the flash array: `flash save` and `flash load` do
+not include them. A harness that restores a device saves these alongside.
+
+| Command | Effect |
+|---|---|
+| `optbytes` | one `<NAME> <value>` line per option byte the target models |
+| `optbytes get <NAME>` | `<NAME> <value>` |
+| `optbytes set <NAME> <value>` | as a completed option-byte change on the chip (`--optbyte` does the same before boot) |
+
+STM32H5 has `SWAP_BANK`, `WRPSG1`, `WRPSG2` (bit N cleared write-protects
+sectors 4N..4N+3 of that bank) and `SECWM1`, `SECWM2`.
 
 ## UART
 

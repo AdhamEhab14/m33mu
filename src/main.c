@@ -29,6 +29,7 @@
 #include "m33mu/memmap.h"
 #include "m33mu/flash_ops.h"
 #include "m33mu/uart_capture.h"
+#include "m33mu/optbytes.h"
 #include "m33mu/covdump.h"
 #include "m33mu/vector.h"
 #include "m33mu/scs.h"
@@ -4980,6 +4981,8 @@ int main(int argc, char **argv)
     mm_u64 opt_flash_cut = MM_FLASH_OPS_NEVER;
     mm_bool opt_flash_cut_erase = MM_FALSE;
     enum mm_flash_timing_level opt_flash_timing = MM_FLASH_TIMING_NONE;
+    const char *opt_optbytes[16];
+    int opt_optbyte_count = 0;
     mm_u32 opt_flash_cut_erase_addr = 0u;
     mm_bool opt_quit_on_faults = MM_FALSE;
     mm_bool opt_capstone = MM_FALSE;
@@ -5201,6 +5204,14 @@ int main(int argc, char **argv)
                 fprintf(stderr, "invalid flash-timing: %s (none, typical or max)\n", argv[i + 1]);
                 return 1;
             }
+            i++;
+        } else if (strcmp(argv[i], "--optbyte") == 0 && i + 1 < argc) {
+            if (strchr(argv[i + 1], '=') == 0 ||
+                opt_optbyte_count >= (int)(sizeof(opt_optbytes) / sizeof(opt_optbytes[0]))) {
+                fprintf(stderr, "invalid optbyte: %s (NAME=VALUE, at most 16)\n", argv[i + 1]);
+                return 1;
+            }
+            opt_optbytes[opt_optbyte_count++] = argv[i + 1];
             i++;
         } else if (strcmp(argv[i], "--flash-cut-erase") == 0 && i + 1 < argc) {
             if (!parse_u32(argv[i + 1], &opt_flash_cut_erase_addr)) {
@@ -5646,7 +5657,7 @@ int main(int argc, char **argv)
 #endif
                         "[--persist] [--no-realtime] "
                         "[--flash-trace <file>] [--flash-cut <n>] [--flash-cut-erase <addr>] "
-                        "[--flash-timing none|typical|max] "
+                        "[--flash-timing none|typical|max] [--optbyte NAME=VALUE] "
                         "[--puf-seed <value>] [--puf-cold-boot <n>] [--puf-noise <n>] "
                         "[--sbkload-key <hex>] "
 #ifdef M33MU_USE_LIBCAPSTONE
@@ -6589,10 +6600,45 @@ int main(int argc, char **argv)
             }
 
             if (opt_gdb) {
-                mm_gdb_stub_notify_stop(&gdb, 5);
+                /* Stop at the first start and at a reset that interrupts a
+                 * debugging session. A reset during `monitor run-for` is
+                 * part of what the harness is running (a bootloader starting
+                 * its new image, a watchdog), and a stopped core has nothing
+                 * to report. */
+                if (first_start) {
+                    mm_gdb_stub_notify_stop(&gdb, 5);
+                } else if (mm_gdb_stub_should_run(&gdb) &&
+                           mm_gdb_stub_cycles_to_deadline(&gdb) == (mm_u64)-1) {
+                    mm_gdb_stub_notify_stop(&gdb, 5);
+                }
             }
 
             if (first_start) {
+                int ob;
+                for (ob = 0; ob < opt_optbyte_count; ++ob) {
+                    char name[32];
+                    const char *eq = strchr(opt_optbytes[ob], '=');
+                    size_t nlen = (size_t)(eq - opt_optbytes[ob]);
+                    mm_u32 v;
+                    if (nlen == 0u || nlen >= sizeof(name) || !parse_u32(eq + 1, &v)) {
+                        fprintf(stderr, "invalid optbyte: %s\n", opt_optbytes[ob]);
+                        rc = 1;
+                        goto cleanup;
+                    }
+                    memcpy(name, opt_optbytes[ob], nlen);
+                    name[nlen] = '\0';
+                    if (!mm_optbytes_set(name, v)) {
+                        size_t k;
+                        fprintf(stderr, "optbyte %s: unknown, or value refused. %s has:",
+                                name, (cpu_name != 0) ? cpu_name : "this cpu");
+                        for (k = 0; k < mm_optbytes_count(); ++k) {
+                            fprintf(stderr, " %s", mm_optbytes_name(k));
+                        }
+                        fprintf(stderr, "%s\n", mm_optbytes_count() == 0u ? " none" : "");
+                        rc = 1;
+                        goto cleanup;
+                    }
+                }
                 if (eth_backend != MM_ETH_BACKEND_NONE) {
                     if (!mm_eth_backend_config(eth_backend, eth_spec)) {
                         fprintf(stderr, "invalid ethernet backend spec\n");
@@ -6722,6 +6768,7 @@ int main(int argc, char **argv)
                         }
                         (void)mm_flash_ops_take_stall_us();
                         mm_flash_ops_set_count(0u);
+                        mm_flash_ops_clear_latches();
                         apply_reset_view(opt_tui ? &tui : 0, &cpu, &map, cycle_total,
                                          opt_tui ? &tui_steps_offset : 0,
                                          opt_tui ? &tui_steps_latched : 0);
@@ -7820,6 +7867,19 @@ cleanup:
             }
         } else if (mm_flash_ops_enabled()) {
             printf("[FLASH] %llu operations\n", (unsigned long long)mm_flash_ops_count());
+        }
+        if (mm_flash_ops_enabled()) {
+            mm_u32 first;
+            mm_u64 n = mm_flash_ops_latch(MM_FLASH_REFUSED, &first);
+            if (n != 0u) {
+                printf("[FLASH] %llu refused programs, first at 0x%08lx\n",
+                       (unsigned long long)n, (unsigned long)first);
+            }
+            n = mm_flash_ops_latch(MM_FLASH_PROTECTED, &first);
+            if (n != 0u) {
+                printf("[FLASH] %llu writes to protected flash, first at 0x%08lx\n",
+                       (unsigned long long)n, (unsigned long)first);
+            }
         }
         mm_flash_ops_trace_close();
         mm_flash_ops_disable();

@@ -45,8 +45,11 @@ static struct {
     const struct mm_flash_timing *timing;
     enum mm_flash_timing_level level;
     mm_u64 stall_us;
+    mm_u64 latch_count[2];
+    mm_u32 latch_first[2];
 } ops = { MM_FALSE, 0, 0, 0u, 0u, 0u, MM_FLASH_OPS_NEVER, MM_FALSE, 0u, MM_FALSE,
-          { 0u, MM_FLASH_OP_PROGRAM, 0u, 0u }, 0, 0, MM_FLASH_TIMING_NONE, 0u };
+          { 0u, MM_FLASH_OP_PROGRAM, 0u, 0u }, 0, 0, MM_FLASH_TIMING_NONE, 0u,
+          { 0u, 0u }, { 0u, 0u } };
 
 mm_bool mm_flash_ops_enable(mm_u8 *flash, mm_u32 size, mm_u32 base)
 {
@@ -63,6 +66,7 @@ mm_bool mm_flash_ops_enable(mm_u8 *flash, mm_u32 size, mm_u32 base)
     ops.count = 0u;
     ops.enabled = MM_TRUE;
     mm_flash_ops_clear_cut();
+    mm_flash_ops_clear_latches();
     return MM_TRUE;
 }
 
@@ -327,4 +331,70 @@ mm_u64 mm_flash_ops_take_stall_us(void)
     mm_u64 us = ops.stall_us;
     ops.stall_us = 0u;
     return us;
+}
+
+/* Shared by refused and protected attempts: MM_FALSE when the power is (or
+ * now goes) off at this one. */
+static mm_bool attempt_starts(enum mm_flash_op_kind kind, mm_u32 offset, mm_u32 len)
+{
+    if (!ops.enabled || offset >= ops.size) return MM_FALSE;
+    if (ops.cut_fired) return MM_FALSE;
+    if (should_cut(kind, offset, len)) {
+        ops.cut_fired = MM_TRUE;
+        ops.cut.index = ops.count;
+        ops.cut.kind = kind;
+        ops.cut.addr = ops.base + offset;
+        ops.cut.len = len;
+        return MM_FALSE;
+    }
+    return MM_TRUE;
+}
+
+static void latch(enum mm_flash_violation kind, mm_u32 offset)
+{
+    if (ops.latch_count[kind] == 0u) {
+        ops.latch_first[kind] = ops.base + offset;
+    }
+    ops.latch_count[kind]++;
+}
+
+void mm_flash_ops_refused(mm_u32 offset, const mm_u8 *wanted, mm_u32 len)
+{
+    mm_u32 i;
+    if (wanted == 0 || len == 0u) return;
+    if (offset < ops.size && len > ops.size - offset) len = ops.size - offset;
+    if (!attempt_starts(MM_FLASH_OP_PROGRAM, offset, len)) return;
+    if (ops.trace != 0) {
+        fprintf(ops.trace, "X 0x%08lX 0x", (unsigned long)(ops.base + offset));
+        for (i = len; i > 0u; --i) fprintf(ops.trace, "%02X", wanted[i - 1u]);
+        fprintf(ops.trace, " 0x");
+        for (i = len; i > 0u; --i) fprintf(ops.trace, "%02X", ops.flash[offset + i - 1u]);
+        fputc('\n', ops.trace);
+        fflush(ops.trace);
+    }
+    latch(MM_FLASH_REFUSED, offset);
+    ops.count++;
+}
+
+void mm_flash_ops_protected(mm_u32 offset, mm_bool erase)
+{
+    if (!attempt_starts(erase ? MM_FLASH_OP_ERASE : MM_FLASH_OP_PROGRAM, offset, 1u)) return;
+    if (ops.trace != 0) {
+        fprintf(ops.trace, "W 0x%08lX\n", (unsigned long)(ops.base + offset));
+        fflush(ops.trace);
+    }
+    latch(MM_FLASH_PROTECTED, offset);
+    ops.count++;
+}
+
+mm_u64 mm_flash_ops_latch(enum mm_flash_violation kind, mm_u32 *first_addr)
+{
+    if (first_addr != 0) *first_addr = ops.latch_first[kind];
+    return ops.latch_count[kind];
+}
+
+void mm_flash_ops_clear_latches(void)
+{
+    ops.latch_count[0] = ops.latch_count[1] = 0u;
+    ops.latch_first[0] = ops.latch_first[1] = 0u;
 }

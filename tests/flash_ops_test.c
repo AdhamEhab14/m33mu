@@ -279,6 +279,62 @@ static int test_nothing_after_cut(void)
     return 0;
 }
 
+/* Refused and protected attempts: operations that change nothing, traced
+ * as X and W, latched, and cuttable like any other. */
+static int test_violations(void)
+{
+    char path[] = "/tmp/m33mu_flash_ops_viol_XXXXXX";
+    char text[256];
+    const mm_u8 wanted[4] = { 0x78, 0x56, 0x34, 0x12 };
+    struct mm_flash_cut cut;
+    mm_u32 first = 0;
+    int fd;
+    int rc = 1;
+
+    memset(flash, 0xFF, sizeof(flash));
+    flash[0x100u] = 0x00u;
+    memset(&persist, 0, sizeof(persist));
+    mm_flash_persist_watch(&persist, flash, SIZE);
+    if (!mm_flash_ops_enable(flash, SIZE, BASE)) return 1;
+    fd = mkstemp(path);
+    if (fd < 0) return 1;
+    close(fd);
+    if (!mm_flash_ops_trace_open(path)) goto out;
+
+    mm_flash_ops_refused(0x100u, wanted, 4u);       /* op 0 */
+    mm_flash_ops_protected(0x2000u, MM_TRUE);       /* op 1 */
+    mm_flash_ops_protected(0x2010u, MM_FALSE);      /* op 2 */
+    mm_flash_ops_trace_close();
+    if (mm_flash_ops_count() != 3u) goto out;
+    if (mm_flash_ops_latch(MM_FLASH_REFUSED, &first) != 1u || first != BASE + 0x100u) goto out;
+    if (mm_flash_ops_latch(MM_FLASH_PROTECTED, &first) != 2u || first != BASE + 0x2000u) goto out;
+    if (read_file(path, text, sizeof(text)) != 0) goto out;
+    if (strcmp(text,
+               "X 0x0C000100 0x12345678 0xFFFFFF00\n"
+               "W 0x0C002000\n"
+               "W 0x0C002010\n") != 0) {
+        fprintf(stderr, "trace:\n%s", text);
+        goto out;
+    }
+    mm_flash_ops_clear_latches();
+    if (mm_flash_ops_latch(MM_FLASH_REFUSED, 0) != 0u ||
+        mm_flash_ops_latch(MM_FLASH_PROTECTED, 0) != 0u) goto out;
+
+    /* a cut can fall on a refused attempt */
+    mm_flash_ops_cut_at(3u);
+    mm_flash_ops_protected(0x2000u, MM_TRUE);
+    if (!mm_flash_ops_cut_fired(&cut) || cut.index != 3u || cut.kind != MM_FLASH_OP_ERASE ||
+        mm_flash_ops_latch(MM_FLASH_PROTECTED, 0) != 0u) {
+        fprintf(stderr, "cut on a protected erase not taken\n");
+        goto out;
+    }
+    rc = 0;
+out:
+    mm_flash_ops_disable();
+    unlink(path);
+    return rc;
+}
+
 int main(void)
 {
     int fails = 0;
@@ -300,6 +356,10 @@ int main(void)
     }
     if (test_nothing_after_cut() != 0) {
         printf("FAIL nothing after cut\n");
+        fails++;
+    }
+    if (test_violations() != 0) {
+        printf("FAIL violations\n");
         fails++;
     }
     if (fails != 0) {

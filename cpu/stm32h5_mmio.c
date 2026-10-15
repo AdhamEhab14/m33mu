@@ -41,6 +41,8 @@
 #include "stm32h5_i2c.h"
 #include "m33mu/memmap.h"
 #include "m33mu/flash_persist.h"
+#include "m33mu/flash_ops.h"
+#include "m33mu/optbytes.h"
 #include "m33mu/target_hal.h"
 #include "m33mu/otp.h"
 #include "m33mu/spi_bus.h"
@@ -338,6 +340,7 @@ extern void mm_system_request_reset(void);
 #define FLASH_FLAG_BSY (1u << 0)
 #define FLASH_FLAG_EOP (1u << 16)
 #define FLASH_FLAG_PGSERR (1u << 18)
+#define FLASH_FLAG_WRPERR (1u << 17)
 
 #define FLASH_CR_LOCK (1u << 0)
 #define FLASH_CR_PG   (1u << 1)
@@ -367,6 +370,10 @@ extern void mm_system_request_reset(void);
 #define FLASH_SECWM1R_PRG  0x0E4u
 #define FLASH_SECWM2R_CUR  0x1E0u
 #define FLASH_SECWM2R_PRG  0x1E4u
+#define FLASH_WRP1R_CUR    0x0E8u
+#define FLASH_WRP1R_PRG    0x0ECu
+#define FLASH_WRP2R_CUR    0x1E8u
+#define FLASH_WRP2R_PRG    0x1ECu
 #define FLASH_SECWM_STRT_MASK  (V->flash_secwm_strt_mask)
 #define FLASH_SECWM_END_SHIFT  16
 #define FLASH_SECWM_EMPTY  (V->flash_secwm_strt_mask) /* STRT=all ones, END=0: no secure sector */
@@ -1500,6 +1507,34 @@ static void flash_handle_key(mm_u32 offset, mm_u32 value)
     }
 }
 
+/* WRPSG option bytes, one per physical bank: bit N cleared write-protects
+ * sectors 4N..4N+3 of that bank (RM0481 7.11.35). Non-volatile, so they live
+ * outside flash_ctl and survive resets; erased (all ones) as shipped. As for
+ * SECWM and SWAP_BANK, the model applies a _PRG write at once. */
+static mm_u32 g_wrpsg[2] = { 0xFFFFFFFFu, 0xFFFFFFFFu };
+
+static mm_bool flash_wrp_protected(mm_u32 offset, mm_u32 length)
+{
+    mm_u32 sector_size = flash_sector_size();
+    mm_u32 bank_size = flash_ctl.flash_size / FLASH_BANK_COUNT;
+    mm_u32 off;
+    if (sector_size == 0u || bank_size == 0u || length == 0u) {
+        return MM_FALSE;
+    }
+    for (off = offset - (offset % sector_size); off < offset + length; off += sector_size) {
+        mm_u32 bank = off / bank_size;
+        mm_u32 group = ((off % bank_size) / sector_size) / 4u;
+        /* the array holds the logical view; WRPSG names physical banks */
+        if (flash_ctl.swap_active) {
+            bank ^= 1u;
+        }
+        if (bank < 2u && group < 32u && ((g_wrpsg[bank] >> group) & 1u) == 0u) {
+            return MM_TRUE;
+        }
+    }
+    return MM_FALSE;
+}
+
 static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
 {
     mm_u32 cr = flash_ctl.regs[cr_off / 4u];
@@ -1567,6 +1602,12 @@ static void flash_apply_erase(mm_u32 cr_off, mm_u32 sr_off)
                (unsigned long)start,
                (unsigned long)length);
     }
+    if (flash_wrp_protected(start, length)) {
+        /* rejected, nothing erased (RM0481 7.9.2) */
+        flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_WRPERR;
+        mm_flash_ops_protected(start, MM_TRUE);
+        return;
+    }
     flash_set_busy(sr_off, MM_TRUE);
     memset(flash_ctl.flash + start, 0xFF, length);
     flash_set_busy(sr_off, MM_FALSE);
@@ -1622,6 +1663,12 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
     if ((flash_ctl.regs[cr_off / 4u] & FLASH_CR_PG) == 0u) {
         return MM_TRUE;
     }
+    if (flash_wrp_protected(offset, size_bytes)) {
+        /* ignored and flagged (RM0481 7.9.2) */
+        flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_WRPERR;
+        mm_flash_ops_protected(offset, MM_FALSE);
+        return MM_TRUE;
+    }
 
     erase_mode = ((flash_ctl.regs[cr_off / 4u] & FLASH_CR_SER) != 0u) ? MM_TRUE : MM_FALSE;
     erase_value = MM_FALSE;
@@ -1638,7 +1685,13 @@ static mm_bool flash_write_cb(void *opaque, enum mm_sec_state sec, mm_u32 addr, 
     if ((flash_ctl.flags & MM_TARGET_FLAG_NVM_WRITEONCE) != 0u && !(erase_mode && erase_value)) {
         for (i = 0; i < size_bytes; ++i) {
             if (flash_ctl.flash[offset + i] != 0xFFu) {
+                mm_u8 wanted[4];
+                mm_u32 k;
+                for (k = 0; k < size_bytes; ++k) {
+                    wanted[k] = (mm_u8)((value >> (8u * k)) & 0xFFu);
+                }
                 flash_ctl.regs[sr_off / 4u] |= FLASH_FLAG_PGSERR;
+                mm_flash_ops_refused(offset, wanted, size_bytes);
                 return MM_TRUE;
             }
         }
@@ -1960,6 +2013,8 @@ static mm_bool flash_read(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u32
 {
     struct flash_state *f = (struct flash_state *)opaque;
     if (value_out == 0 || size_bytes == 0 || size_bytes > 4) return MM_FALSE;
+    f->regs[FLASH_WRP1R_CUR / 4u] = f->regs[FLASH_WRP1R_PRG / 4u] = g_wrpsg[0];
+    f->regs[FLASH_WRP2R_CUR / 4u] = f->regs[FLASH_WRP2R_PRG / 4u] = g_wrpsg[1];
     if ((offset + size_bytes) > FLASH_SIZE) return MM_FALSE;
     memcpy(value_out, (mm_u8 *)f->regs + offset, size_bytes);
     return MM_TRUE;
@@ -2017,8 +2072,16 @@ static mm_bool flash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         return MM_TRUE;
     }
 
-    if (offset == FLASH_SECWM1R_CUR || offset == FLASH_SECWM2R_CUR) {
+    if (offset == FLASH_SECWM1R_CUR || offset == FLASH_SECWM2R_CUR ||
+        offset == FLASH_WRP1R_CUR || offset == FLASH_WRP2R_CUR) {
         /* _CUR registers are loaded from option bytes, not writable. */
+        return MM_TRUE;
+    }
+
+    if (offset == FLASH_WRP1R_PRG || offset == FLASH_WRP2R_PRG) {
+        if (size_bytes == 4u) {
+            g_wrpsg[(offset == FLASH_WRP1R_PRG) ? 0 : 1] = value;
+        }
         return MM_TRUE;
     }
 
@@ -2037,6 +2100,8 @@ static mm_bool flash_write(void *opaque, mm_u32 offset, mm_u32 size_bytes, mm_u3
         if ((value & (1u << 16)) != 0u) {
             flash_clear_eop(sr_off);
         }
+        /* CLR_WRPERR, CLR_PGSERR (RM0481 7.11.11) */
+        f->regs[sr_off / 4u] &= ~(value & (FLASH_FLAG_WRPERR | FLASH_FLAG_PGSERR));
         return MM_TRUE;
     }
 
@@ -2405,6 +2470,54 @@ void stm32h5_watchdog_tick(mm_u64 cycles)
             }
         }
     }
+}
+
+/* Option bytes by name (m33mu/optbytes.h). Setting one has the effect of a
+ * completed option-byte change, as the _PRG registers have in this model. */
+static mm_u32 optb_swap_bank_get(void)
+{
+    return flash_ctl.swap_active ? 1u : 0u;
+}
+
+static mm_bool optb_swap_bank_set(mm_u32 value)
+{
+    if (value > 1u || (value != 0u && !flash_ctl.dualbank_enabled)) {
+        return MM_FALSE;
+    }
+    flash_set_swap_state(&flash_ctl, value != 0u);
+    flash_sync_option_regs(&flash_ctl);
+    return MM_TRUE;
+}
+
+static mm_u32 optb_wrpsg1_get(void) { return g_wrpsg[0]; }
+static mm_u32 optb_wrpsg2_get(void) { return g_wrpsg[1]; }
+static mm_bool optb_wrpsg1_set(mm_u32 value) { g_wrpsg[0] = value; return MM_TRUE; }
+static mm_bool optb_wrpsg2_set(mm_u32 value) { g_wrpsg[1] = value; return MM_TRUE; }
+
+static mm_u32 optb_secwm1_get(void) { return flash_ctl.regs[FLASH_SECWM1R_CUR / 4u]; }
+static mm_u32 optb_secwm2_get(void) { return flash_ctl.regs[FLASH_SECWM2R_CUR / 4u]; }
+
+static mm_bool optb_secwm1_set(mm_u32 value)
+{
+    flash_ctl.regs[FLASH_SECWM1R_PRG / 4u] = value;
+    flash_ctl.regs[FLASH_SECWM1R_CUR / 4u] = value;
+    return MM_TRUE;
+}
+
+static mm_bool optb_secwm2_set(mm_u32 value)
+{
+    flash_ctl.regs[FLASH_SECWM2R_PRG / 4u] = value;
+    flash_ctl.regs[FLASH_SECWM2R_CUR / 4u] = value;
+    return MM_TRUE;
+}
+
+static void stm32h5_register_optbytes(void)
+{
+    mm_optbytes_register("SWAP_BANK", optb_swap_bank_get, optb_swap_bank_set);
+    mm_optbytes_register("WRPSG1", optb_wrpsg1_get, optb_wrpsg1_set);
+    mm_optbytes_register("WRPSG2", optb_wrpsg2_get, optb_wrpsg2_set);
+    mm_optbytes_register("SECWM1", optb_secwm1_get, optb_secwm1_set);
+    mm_optbytes_register("SECWM2", optb_secwm2_get, optb_secwm2_set);
 }
 
 static mm_bool stm32h5_register_mmio_impl(struct mmio_bus *bus)
@@ -2862,6 +2975,7 @@ static mm_bool stm32h5_register_mmio_impl(struct mmio_bus *bus)
     if (V->usb_register_mmio != 0 && !V->usb_register_mmio(bus)) return MM_FALSE;
     if (!stm32h5_eth_register_mmio(bus, stm32h5_rcc_regs())) return MM_FALSE;
     if (!stm32h5_i2c_init(bus, 0, V->i2c_count)) return MM_FALSE;
+    stm32h5_register_optbytes();
     return MM_TRUE;
 }
 

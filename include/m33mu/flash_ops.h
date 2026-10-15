@@ -90,6 +90,24 @@ mm_u32 mm_flash_ops_size(void);
 mm_bool mm_flash_ops_load_file(const char *path);
 mm_bool mm_flash_ops_save_file(const char *path);
 
+/* An operation the chip started but did not carry out, reported by the port
+ * that refused it: a program the chip's rules do not allow (`wanted` is
+ * what the firmware tried to write), or a program or erase of
+ * write-protected flash. Nothing changes in the array. Each counts as an
+ * operation (power can fail there too), is traced as
+ *   X <addr> <wanted> <old>   refused program
+ *   W <addr>                  write-protected program or erase
+ * and is latched for mm_flash_ops_latch(). */
+enum mm_flash_violation {
+    MM_FLASH_REFUSED = 0,
+    MM_FLASH_PROTECTED
+};
+void mm_flash_ops_refused(mm_u32 offset, const mm_u8 *wanted, mm_u32 len);
+void mm_flash_ops_protected(mm_u32 offset, mm_bool erase);
+/* How many since the last clear, and the first address. */
+mm_u64 mm_flash_ops_latch(enum mm_flash_violation kind, mm_u32 *first_addr);
+void mm_flash_ops_clear_latches(void);
+
 /* Called for every operation, after the port applied it to the array.
  * Returns MM_FALSE when this is the operation to cut at, or any operation
  * after it (the power is off): the range is put back as it was. */

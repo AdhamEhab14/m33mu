@@ -21,9 +21,10 @@
 
 /* Target for scripts/gdb-harness-test.py (STM32H563, secure).
  *
- * Prints "BOOT" on USART3, waits for one received byte and echoes it as
- * "GOT <c>", erases sector 100 of bank 1 and programs one quad-word at its
- * start, prints "DONE", then sleeps. */
+ * Prints "BOOT" on USART3. If sector 100 of bank 1 starts with its marker,
+ * prints "UPDATED" and sleeps. Otherwise waits for one received byte and
+ * echoes it as "GOT <c>", erases the sector and programs the marker
+ * quad-word at its start, prints "DONE" and resets itself. */
 
 #include <stdint.h>
 
@@ -45,6 +46,8 @@
 #define CR_SER         (1u << 2)
 #define CR_STRT        (1u << 5)
 #define CR_SNB_SHIFT   6
+
+#define AIRCR          REG(0xE000ED0Cu)
 
 #define SECTOR         100u
 #define SECTOR_ADDR    (0x0C000000u + SECTOR * 0x2000u)
@@ -76,6 +79,12 @@ void Reset_Handler(void)
     USART_BRR = 64000000u / 115200u;
     USART_CR1 = (1u << 0) | (1u << 2) | (1u << 3);     /* UE, RE, TE */
     puts_("BOOT\n");
+    if (dst[0] == 0x11111111u) {
+        puts_("UPDATED\n");
+        while (1) {
+            __asm volatile ("wfi");
+        }
+    }
 
     while ((USART_ISR & (1u << 5)) == 0u) { }           /* RXNE */
     c = (char)USART_RDR;
@@ -93,10 +102,9 @@ void Reset_Handler(void)
     dst[3] = 0x44444444u;
     FLASH_SECCR = 0u;
     puts_("DONE\n");
-
-    while (1) {
-        __asm volatile ("wfi");
-    }
+    while ((USART_ISR & (1u << 6)) == 0u) { }           /* TC: all sent */
+    AIRCR = 0x05FA0004u;                                /* SYSRESETREQ */
+    while (1) { }
 }
 
 __attribute__((section(".isr_vector")))

@@ -330,6 +330,12 @@ erase of the whole array
 .TP
 .BR "B addr #" len
 bulk rewrite of the whole array (bank swap)
+.TP
+.B X addr wanted old
+a program the chip's rules refuse (on STM32H5, over a word that is not erased); nothing changes
+.TP
+.B W addr
+a program or erase of write\-protected flash; nothing changes
 .RE
 .IP
 With
@@ -351,6 +357,18 @@ Timing data exists for stm32h563 (DS14258 table 51: 31/100 us per 128 bits, 2/10
 Combine with
 .B --no-realtime
 unless the delays should also be felt in wall time.
+.TP
+.BR --optbyte " " NAME=VALUE
+Set an option byte as the device ships, before it boots. May be repeated. The names are the target's; an unknown name lists them. On STM32H5:
+.BR SWAP_BANK ,
+.B WRPSG1
+and
+.B WRPSG2
+(bit N cleared write\-protects sectors 4N..4N+3 of that bank),
+.B SECWM1
+and
+.BR SECWM2 .
+Option bytes are kept apart from the flash image.
 .TP
 .BR --flash-cut " " n
 Cut the power just before flash operation

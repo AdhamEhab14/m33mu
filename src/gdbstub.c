@@ -26,6 +26,7 @@
 #include "m33mu/code_cache.h"
 #include "m33mu/flash_ops.h"
 #include "m33mu/uart_capture.h"
+#include "m33mu/optbytes.h"
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -1205,6 +1206,18 @@ static void harness_flash(struct mm_gdb_stub *stub, struct mm_memmap *map, const
             return;
         }
         harness_reply(stub, 0);
+    } else if (strcmp(args, "latches") == 0) {
+        mm_u32 rf;
+        mm_u32 pf;
+        mm_u64 rn = mm_flash_ops_latch(MM_FLASH_REFUSED, &rf);
+        mm_u64 pn = mm_flash_ops_latch(MM_FLASH_PROTECTED, &pf);
+        snprintf(line, sizeof(line), "flash latches refused %llu 0x%08lx protected %llu 0x%08lx\n",
+                 (unsigned long long)rn, (unsigned long)rf,
+                 (unsigned long long)pn, (unsigned long)pf);
+        harness_reply(stub, line);
+    } else if (strcmp(args, "latches clear") == 0) {
+        mm_flash_ops_clear_latches();
+        harness_reply(stub, 0);
     } else if (strcmp(args, "info") == 0) {
         snprintf(line, sizeof(line), "flash 0x%08lx 0x%lx\n",
                  (unsigned long)mm_flash_ops_base(), (unsigned long)mm_flash_ops_size());
@@ -1322,6 +1335,39 @@ static mm_bool gdb_monitor_harness(struct mm_gdb_stub *stub, struct mm_memmap *m
         harness_flash(stub, map, cmd + 6);
     } else if (strncmp(cmd, "uart ", 5) == 0) {
         harness_uart(stub, cmd + 5);
+    } else if (strcmp(cmd, "optbytes") == 0) {
+        char out[512];
+        size_t pos = 0;
+        size_t k;
+        out[0] = '\0';
+        for (k = 0; k < mm_optbytes_count() && pos < sizeof(out); ++k) {
+            mm_u32 val = 0;
+            (void)mm_optbytes_get(mm_optbytes_name(k), &val);
+            pos += (size_t)snprintf(out + pos, sizeof(out) - pos, "%s 0x%08lx\n",
+                                    mm_optbytes_name(k), (unsigned long)val);
+        }
+        harness_reply(stub, (mm_optbytes_count() != 0u) ? out : 0);
+    } else if (strncmp(cmd, "optbytes get ", 13) == 0) {
+        mm_u32 val = 0;
+        if (!mm_optbytes_get(cmd + 13, &val)) {
+            harness_reply_error(stub, "optbytes: no such option byte (see `monitor optbytes`)");
+            return MM_TRUE;
+        }
+        snprintf(line, sizeof(line), "%s 0x%08lx\n", cmd + 13, (unsigned long)val);
+        harness_reply(stub, line);
+    } else if (strncmp(cmd, "optbytes set ", 13) == 0) {
+        char name[32];
+        char valstr[32];
+        if (sscanf(cmd + 13, "%31s %31s", name, valstr) != 2 ||
+            !harness_parse_u64(valstr, &v) || v > 0xFFFFFFFFull) {
+            harness_reply_error(stub, "optbytes set <NAME> <value>");
+            return MM_TRUE;
+        }
+        if (!mm_optbytes_set(name, (mm_u32)v)) {
+            harness_reply_error(stub, "optbytes set: no such option byte, or value refused");
+            return MM_TRUE;
+        }
+        harness_reply(stub, 0);
     } else {
         return MM_FALSE;
     }

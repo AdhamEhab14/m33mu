@@ -2,9 +2,11 @@
 """Drive m33mu through its GDB monitor commands as a power-cut harness would.
 
 Runs tests/firmware/test-gdb-harness (STM32H563): talks to it over a
-captured UART, traces its flash operations, then power-cycles it from the
-original image with a cut armed at its first program, and checks that the
-cut operation never reached flash.
+captured UART and lets it update its flash and reset itself, all within one
+`run-for`; power-cycles it from the original image with a cut armed at its
+first program and checks that the cut operation never reached flash; then
+write-protects the sector through an option byte and checks that the
+update is refused and reported.
 
 Usage: gdb-harness-test.py <path-to-m33mu>
 Exit 0 on pass (or skip: no firmware and no cross compiler), 1 on failure.
@@ -132,8 +134,10 @@ def run(m33mu, work):
         g.must("uart write 0x%x 41" % UART)
         check(g.run_for(100000) == "S05", "second deadline")
         t1 = int(g.must("vtime").split()[1])
-        check(t1 - t0 >= 64000000 // 10, "run-for advanced 100 ms of virtual time")
-        check(g.uart_read() == b"GOT A\nDONE\n", "echo and done")
+        check(t1 - t0 >= 64000000 // 10,
+              "run-for ran its 100 ms through the firmware's own reset")
+        check(g.uart_read() == b"GOT A\nDONE\nBOOT\nUPDATED\n",
+              "echo, update, reset, boot the update")
         ops = int(g.must("flash ops").split()[2])
         g.must("flash trace off")
         lines = open(trace).read().splitlines()
@@ -159,6 +163,7 @@ def run(m33mu, work):
         check(status[:5] == ["flash", "cut", "1", "program", "0x%08x" % SECTOR_ADDR],
               "cut status names the program: %s" % status)
         check(g.uart_read() == b"GOT B\n", "nothing printed after the cut")
+        check([g.must("flash latches").split()[i] for i in (3, 6)] == ["0", "0"], "no violations")
         check(g.run_for(10000) == "S05" and g.must("flash cut status").split()[2] == "1",
               "the core stays halted while the power is off")
         cut = os.path.join(work, "cut.bin")
@@ -166,6 +171,25 @@ def run(m33mu, work):
         img = open(cut, "rb").read()
         check(img[off:off + 0x2000] == b"\xff" * 0x2000, "the erase happened, the program did not")
 
+        # write-protect sector 100 (group 25 of bank 1) through the option byte
+        g.must("flash load " + original)
+        check(g.must("optbytes get WRPSG1").split() == ["WRPSG1", "0xffffffff"], "WRPSG1 as shipped")
+        g.must("optbytes set WRPSG1 0xfdffffff")
+        check("WRPSG1 0xfdffffff" in g.must("optbytes"), "optbytes lists it")
+        g.must("power-cycle")
+        g.run_for(50000)
+        g.must("uart write 0x%x 43" % UART)
+        g.run_for(100000)
+        check(g.uart_read() == b"BOOT\nGOT C\nDONE\nBOOT\n", "protected update does nothing")
+        latches = g.must("flash latches").split()
+        check(latches[6:8] == ["5", "0x%08x" % SECTOR_ADDR] and latches[3] == "0",
+              "erase and four programs refused as protected: %s" % latches)
+        g.must("flash save " + cut)
+        check(open(cut, "rb").read()[off:off + 16] == b"\xff" * 16, "sector untouched")
+        g.must("optbytes set WRPSG1 0xffffffff")
+
+        ok, out = g.monitor("optbytes set NOPE 1")
+        check(not ok and out.startswith("error:"), "unknown option byte refused")
         ok, out = g.monitor("flash load /nonexistent/image.bin")
         check(not ok and out.startswith("error:"), "errors are reported")
         g.monitor("quit")
