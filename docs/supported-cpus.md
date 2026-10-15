@@ -18,6 +18,21 @@ These values are accepted by `--cpu`:
 - `m2354` — Nuvoton NuMicro M2354 (Cortex-M23, ARMv8-M Baseline)
 - `imxrt700` — NXP i.MX RT700 / MIMXRT798S (dual Cortex-M33, TrustZone, ELS / PKC / PUF)
 
+### STM32H5 flash notes
+
+- **Programming.** Stores with PG set collect in the 128-bit write buffer (`WBNE`
+  while it waits); the flash word is programmed in one operation once all 16 bytes are
+  in, or on `FW`, with the bytes never written left at 1. A store to another flash word
+  before the buffer is full raises `INCERR` and loses both; an erase or option change
+  started with `WBNE` set raises `PGSERR` (RM0481 7.3.5, 7.9). A flash word is never
+  programmed twice: over one that is not erased the program is refused with `PGSERR`.
+- **Option bytes.** `FLASH_OPTCR` is locked until `FLASH_OPTKEYR` takes its two keys.
+  The `_PRG` registers (`OPTSR`, `SECWMx`, `WRPx`) change only while it is unlocked,
+  and an option change (`OPTSTRT`) makes them the option bytes in force (`_CUR`).
+  Write protection and the watermarks act at once; a new `SWAP_BANK` waits for the next
+  reset, and `FLASH_OPTCR.SWAP_BANK` tells which mapping is in force now (RM0481 7.3.10).
+  `--optbyte` and `monitor optbytes` set them as the device ships.
+
 ### i.MX RT700 notes
 
 - **Boot.** The part is flashless: the XSPI0 AHB window (`0x28000000` NS / `0x38000000` S)
