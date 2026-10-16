@@ -306,7 +306,9 @@ void mm_lpc55s69_puf_reset(void)
 static mm_u32 puf_allow(const struct lpc55s69_puf_state *s)
 {
     if (s->zeroized) {
-        return 0;
+        /* Re-activation via START with the stored AC is the one command
+         * allowed after zeroize; every other command stays blocked. */
+        return PUF_ALLOW_START;
     }
     return PUF_ALLOW_ENROLL | PUF_ALLOW_START |
            PUF_ALLOW_SETKEY | PUF_ALLOW_GETKEY;
@@ -318,7 +320,10 @@ static mm_u32 puf_stat(const struct lpc55s69_puf_state *s)
     if ((s->pwrctl & 0x1u) == 0u) {
         return 0;
     }
-    if (s->zeroized || s->error) {
+    /* In-flight operations report their own progress; the zeroized/error
+     * state only applies between operations (a failed AC match sets
+     * error and completes the op). */
+    if (s->op == PUF_OP_NONE && (s->zeroized || s->error)) {
         return PUF_STAT_ERROR;
     }
     stat = 0;
