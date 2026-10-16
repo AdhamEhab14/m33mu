@@ -1798,7 +1798,9 @@ static mm_bool addr_exec_ok(const struct mm_memmap *map, mm_u32 addr)
     return (instr != 0u) ? MM_TRUE : MM_FALSE;
 }
 
-static void rp2350_usb_sync_vector_ready(const struct mm_scs *scs, const struct mm_memmap *map)
+static void rp2350_usb_sync_vector_ready(const char *cpu_name,
+                                         const struct mm_scs *scs,
+                                         const struct mm_memmap *map)
 {
     mm_u32 entry = 0;
     mm_u32 vec_addr;
@@ -1810,6 +1812,9 @@ static void rp2350_usb_sync_vector_ready(const struct mm_scs *scs, const struct 
     static mm_u32 last_entry = 0;
     static mm_bool last_valid = MM_FALSE;
     if (scs == 0 || map == 0) return;
+    if (cpu_name == 0 || strcmp(cpu_name, "rp2350") != 0) {
+        return;
+    }
     vec_addr = scs->vtor_ns + (mm_u32)(16u + 14u) * 4u;
     if (mm_memmap_read(map, MM_NONSECURE, vec_addr, 4u, &entry)) {
         entry_addr = entry & ~1u;
@@ -6923,7 +6928,7 @@ int main(int argc, char **argv)
                     mm_target_usart_poll(&cfg);
                     mm_target_spi_poll(&cfg);
                     mm_target_eth_poll(&cfg);
-                    rp2350_usb_sync_vector_ready(&scs, &map);
+                    rp2350_usb_sync_vector_ready(cpu_name, &scs, &map);
                     mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
@@ -7085,7 +7090,7 @@ int main(int argc, char **argv)
                             mm_target_usart_poll(&cfg);
                             mm_target_spi_poll(&cfg);
                             mm_target_eth_poll(&cfg);
-                            rp2350_usb_sync_vector_ready(&scs, &map);
+                            rp2350_usb_sync_vector_ready(cpu_name, &scs, &map);
                             mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
@@ -7122,7 +7127,7 @@ int main(int argc, char **argv)
                             mm_target_usart_poll(&cfg);
                             mm_target_spi_poll(&cfg);
                             mm_target_eth_poll(&cfg);
-                            rp2350_usb_sync_vector_ready(&scs, &map);
+                            rp2350_usb_sync_vector_ready(cpu_name, &scs, &map);
                             mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
@@ -7428,7 +7433,7 @@ check_irq_pending:
                             mm_target_usart_poll(&cfg);
                             mm_target_spi_poll(&cfg);
                             mm_target_eth_poll(&cfg);
-                            rp2350_usb_sync_vector_ready(&scs, &map);
+                            rp2350_usb_sync_vector_ready(cpu_name, &scs, &map);
                             mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                             mm_usbdev_poll();
                             update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
@@ -7780,7 +7785,7 @@ check_irq_pending:
                     mm_target_usart_poll(&cfg);
                     mm_target_spi_poll(&cfg);
                     mm_target_eth_poll(&cfg);
-                    rp2350_usb_sync_vector_ready(&scs, &map);
+                    rp2350_usb_sync_vector_ready(cpu_name, &scs, &map);
                     mm_usbdev_set_paused(cpu.primask_ns != 0u ? MM_TRUE : MM_FALSE);
                     mm_usbdev_poll();
                     update_tui_steps_latched(opt_gdb, &gdb, tui_paused, tui_step, cycle_total,
